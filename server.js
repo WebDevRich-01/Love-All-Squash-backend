@@ -384,6 +384,11 @@ app.get('/api/tournaments/:id/matches/playable', async (req, res) => {
 app.post(
   '/api/tournaments/:tournamentId/matches/:matchId/result',
   async (req, res) => {
+    console.log('=== TOURNAMENT MATCH RESULT API CALLED ===');
+    console.log('Tournament ID:', req.params.tournamentId);
+    console.log('Match ID:', req.params.matchId);
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+
     try {
       const { tournamentId, matchId } = req.params;
       const matchResult = req.body;
@@ -419,11 +424,233 @@ app.post(
 
       // Update existing matches
       if (result.updatedMatches && result.updatedMatches.length > 0) {
-        await Promise.all(
-          result.updatedMatches.map((match) =>
-            TournamentMatch.findByIdAndUpdate(match._id, match)
-          )
+        console.log(
+          `Updating ${result.updatedMatches.length} existing matches:`
         );
+        result.updatedMatches.forEach((match, index) => {
+          console.log(
+            `  Match ${index + 1}: ${match.match_number} - Status: ${
+              match.status
+            }, Has result: ${!!match.result}, ID: ${match._id}`
+          );
+        });
+
+        const updateResults = await Promise.all(
+          result.updatedMatches.map(async (match) => {
+            console.log(
+              `Updating match ${match._id} to status: ${match.status}`
+            );
+            const updateResult = await TournamentMatch.findByIdAndUpdate(
+              match._id,
+              match,
+              { new: true }
+            );
+            console.log(
+              `Update result for ${match._id}: Status now ${
+                updateResult?.status
+              }, Has result: ${!!updateResult?.result}`
+            );
+            return updateResult;
+          })
+        );
+        console.log(
+          `Successfully updated ${result.updatedMatches.length} matches`
+        );
+      } else {
+        console.log('No existing matches to update');
+      }
+
+      // For Monrad tournaments, resolve placeholder matches in next round
+      // This happens AFTER the current match is marked as completed
+      if (tournament.format === 'monrad') {
+        const nextRound = tournamentMatch.round + 1;
+        if (nextRound <= result.state.totalRounds) {
+          console.log(`Resolving placeholder matches in round ${nextRound}`);
+
+          // Find matches in next round with seed_position placeholders
+          const nextRoundMatches = await TournamentMatch.find({
+            tournament_id: tournamentId,
+            round: nextRound,
+            $or: [
+              { 'participant_a.type': 'seed_position' },
+              { 'participant_b.type': 'seed_position' },
+            ],
+          });
+
+          console.log(
+            `Found ${nextRoundMatches.length} matches with placeholders in round ${nextRound}`
+          );
+
+          // Update matches where both participants are now determined
+          // First, get all completed matches from the current round to determine which participants are available
+
+          // Add a longer delay to ensure database consistency
+          console.log('Waiting for database consistency...');
+          await new Promise((resolve) => setTimeout(resolve, 500));
+
+          const completedCurrentRoundMatches = await TournamentMatch.find({
+            tournament_id: tournamentId,
+            round: tournamentMatch.round,
+            status: 'completed',
+          });
+
+          // Also query all matches in the current round to see their statuses
+          const allCurrentRoundMatches = await TournamentMatch.find({
+            tournament_id: tournamentId,
+            round: tournamentMatch.round,
+          });
+
+          console.log(
+            `Total matches in round ${tournamentMatch.round}:`,
+            await TournamentMatch.countDocuments({
+              tournament_id: tournamentId,
+              round: tournamentMatch.round,
+            })
+          );
+          console.log(
+            `Completed matches in round ${tournamentMatch.round}:`,
+            completedCurrentRoundMatches.length
+          );
+
+          // Debug all matches in current round
+          console.log('All matches in current round:');
+          allCurrentRoundMatches.forEach((match, index) => {
+            console.log(
+              `  Match ${index + 1}: ${match.match_number}, Status: ${
+                match.status
+              }, Has result: ${!!match.result}`
+            );
+          });
+
+          // Debug: Let's see what the completed matches look like
+          console.log('Completed matches details:');
+          completedCurrentRoundMatches.forEach((match, index) => {
+            console.log(
+              `  Completed match ${index + 1}: ${match.match_number}, Status: ${
+                match.status
+              }, Winner: ${match.result?.winner_id}, Loser: ${
+                match.result?.loser_id
+              }`
+            );
+          });
+
+          // Extract participant IDs from completed matches (winners and losers)
+          const availableParticipantIds = new Set();
+          completedCurrentRoundMatches.forEach((match) => {
+            console.log(`Processing completed match ${match.match_number}:`, {
+              winner: match.result?.winner_participant_id,
+              loser: match.result?.loser_participant_id,
+            });
+            if (match.result?.winner_participant_id) {
+              availableParticipantIds.add(
+                match.result.winner_participant_id.toString()
+              );
+            }
+            if (match.result?.loser_participant_id) {
+              availableParticipantIds.add(
+                match.result.loser_participant_id.toString()
+              );
+            }
+          });
+
+          console.log(
+            `Available participants from completed matches:`,
+            Array.from(availableParticipantIds)
+          );
+
+          for (const match of nextRoundMatches) {
+            let updated = false;
+            const matchUpdate = { ...match.toObject() };
+
+            console.log(`Processing match ${match.match_number}:`);
+            console.log(
+              `  participant_a: ${match.participant_a?.type}, seed: ${match.participant_a?.seed}`
+            );
+            console.log(
+              `  participant_b: ${match.participant_b?.type}, seed: ${match.participant_b?.seed}`
+            );
+            console.log(
+              `  Current seed positions:`,
+              result.state.seedPositions
+            );
+
+            // Resolve participant_a if it's a placeholder and the participant is available
+            if (matchUpdate.participant_a.type === 'seed_position') {
+              const seedPosition = matchUpdate.participant_a.seed;
+              console.log(
+                `Looking for seed position ${seedPosition} in seedPositions`
+              );
+
+              const seedInfo = result.state.seedPositions[seedPosition];
+              console.log(
+                `Found participant info for seed ${seedPosition}:`,
+                seedInfo
+              );
+
+              if (
+                seedInfo &&
+                seedInfo.participant_id &&
+                availableParticipantIds.has(seedInfo.participant_id.toString())
+              ) {
+                matchUpdate.participant_a = {
+                  type: 'participant',
+                  participant_id: seedInfo.participant_id,
+                  name: seedInfo.name,
+                };
+                updated = true;
+                console.log(
+                  `Resolved participant_a seed ${seedPosition} to ${seedInfo.name}`
+                );
+              }
+            }
+
+            // Resolve participant_b if it's a placeholder and the participant is available
+            if (matchUpdate.participant_b.type === 'seed_position') {
+              const seedPosition = matchUpdate.participant_b.seed;
+              console.log(
+                `Looking for seed position ${seedPosition} in seedPositions`
+              );
+
+              const seedInfo = result.state.seedPositions[seedPosition];
+              console.log(
+                `Found participant info for seed ${seedPosition}:`,
+                seedInfo
+              );
+
+              if (
+                seedInfo &&
+                seedInfo.participant_id &&
+                availableParticipantIds.has(seedInfo.participant_id.toString())
+              ) {
+                matchUpdate.participant_b = {
+                  type: 'participant',
+                  participant_id: seedInfo.participant_id,
+                  name: seedInfo.name,
+                };
+                updated = true;
+                console.log(
+                  `Resolved participant_b seed ${seedPosition} to ${seedInfo.name}`
+                );
+              }
+            }
+
+            // If both participants are now determined, make the match ready
+            if (
+              matchUpdate.participant_a.type === 'participant' &&
+              matchUpdate.participant_b.type === 'participant' &&
+              match.status === 'pending'
+            ) {
+              matchUpdate.status = 'ready';
+              updated = true;
+              console.log(`Match ${match.match_number} is now ready to play`);
+            }
+
+            // Update the match if changes were made
+            if (updated) {
+              await TournamentMatch.findByIdAndUpdate(match._id, matchUpdate);
+            }
+          }
+        }
       }
 
       // Create new matches

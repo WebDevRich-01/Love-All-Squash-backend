@@ -20,7 +20,7 @@ const tournamentMatchSchema = new mongoose.Schema({
   participant_a: {
     type: {
       type: String,
-      enum: ['participant', 'qualifier', 'bye'],
+      enum: ['participant', 'qualifier', 'bye', 'seed_position'],
       default: 'participant',
     },
     participant_id: {
@@ -28,13 +28,14 @@ const tournamentMatchSchema = new mongoose.Schema({
       ref: 'TournamentParticipant',
     },
     qualifier: String, // "W1", "L3", "PoolA#1", etc.
+    seed: Number, // For seed_position type - which seed position this represents
     name: String, // Resolved name for display
   },
 
   participant_b: {
     type: {
       type: String,
-      enum: ['participant', 'qualifier', 'bye'],
+      enum: ['participant', 'qualifier', 'bye', 'seed_position'],
       default: 'participant',
     },
     participant_id: {
@@ -42,6 +43,7 @@ const tournamentMatchSchema = new mongoose.Schema({
       ref: 'TournamentParticipant',
     },
     qualifier: String,
+    seed: Number, // For seed_position type - which seed position this represents
     name: String,
   },
 

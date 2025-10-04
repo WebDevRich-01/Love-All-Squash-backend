@@ -4,10 +4,10 @@ const ITournamentFormat = require('../ITournamentFormat');
  * Monrad (Progressive Consolation) Tournament Format
  *
  * Features:
- * - Everyone plays every round
- * - Winners move up, losers move down
+ * - Predetermined bracket structure with fixed seed positions per round
+ * - Progressive population: winners/losers fill specific positions
+ * - Matches use placeholders until prerequisite matches complete
  * - Produces complete ranking (1st, 2nd, 3rd, ... Nth)
- * - No rematches in adjacent rounds where possible
  */
 class MonradFormat extends ITournamentFormat {
   get id() {
@@ -41,11 +41,15 @@ class MonradFormat extends ITournamentFormat {
   }
 
   generateInitialState(config, participants) {
-    const totalRounds = this._calculateRounds(participants.length);
     const sortedParticipants = this._sortParticipants(participants);
+    const totalRounds = this._calculateRounds(sortedParticipants.length);
 
-    // Generate first round matches using initial seeding
-    const matches = this._generateFirstRoundMatches(sortedParticipants);
+    console.log(
+      `MonradFormat: Generating initial state for ${sortedParticipants.length} participants, ${totalRounds} rounds`
+    );
+
+    // Generate ALL matches for ALL rounds with placeholders
+    const matches = this._generateAllMatches(sortedParticipants, totalRounds);
 
     const state = {
       format: 'monrad',
@@ -53,19 +57,41 @@ class MonradFormat extends ITournamentFormat {
       totalRounds,
       currentRound: 1,
       participantHistory: this._initializeHistory(sortedParticipants),
+      seedPositions: this._initializeSeedPositions(sortedParticipants),
       completed: false,
     };
 
+    console.log(
+      `MonradFormat: Generated ${matches.length} total matches across ${totalRounds} rounds`
+    );
     return { state, matches, groups: [] };
   }
 
   onMatchResult(state, tournamentMatch, matchResult) {
+    console.log(
+      `MonradFormat: Processing match result for Round ${tournamentMatch.round}, Match ${tournamentMatch.match_number}`
+    );
+    console.log(
+      `MonradFormat: Winner: ${matchResult.winner_name}, Loser: ${matchResult.loser_name}`
+    );
+    console.log(`MonradFormat: tournamentMatch._id: ${tournamentMatch._id}`);
+    console.log(
+      `MonradFormat: tournamentMatch keys:`,
+      Object.keys(tournamentMatch)
+    );
+
     const updatedMatches = [];
     const newMatches = [];
 
     // Update current match with result
+    // Update current match with result
+    // Convert Mongoose document to plain object to preserve _id
+    const matchData = tournamentMatch.toObject
+      ? tournamentMatch.toObject()
+      : tournamentMatch;
+
     const updatedMatch = {
-      ...tournamentMatch,
+      ...matchData,
       status: 'completed',
       completed_at: new Date(),
       result: {
@@ -78,125 +104,295 @@ class MonradFormat extends ITournamentFormat {
         retired: matchResult.retired || false,
       },
     };
+
+    console.log(`MonradFormat: updatedMatch._id: ${updatedMatch._id}`);
+    console.log(`MonradFormat: updatedMatch keys:`, Object.keys(updatedMatch));
+
     updatedMatches.push(updatedMatch);
 
-    // Update participant history
+    // Update participant history and seed positions
     const newState = this._updateParticipantHistory(state, matchResult);
+    this._updateSeedPositions(newState, tournamentMatch, matchResult);
 
-    // For Monrad, we generate matches progressively
-    // Check if we should generate matches for the next round
-    if (tournamentMatch.round < newState.totalRounds) {
-      // Generate matches for the next round
-      const nextRoundMatches = this._generateNextRoundMatches(
-        newState,
-        tournamentMatch.round + 1
-      );
-      console.log(
-        `MonradFormat: Generated ${nextRoundMatches.length} matches for round ${
-          tournamentMatch.round + 1
-        }`
-      );
-      newMatches.push(...nextRoundMatches);
-    } else {
-      newState.completed = true;
+    // Find and update any matches that now have both participants determined
+    const resolvedMatches = this._resolveWaitingMatches(
+      newState,
+      tournamentMatch
+    );
+    updatedMatches.push(...resolvedMatches);
+
+    // Check if tournament is complete
+    if (tournamentMatch.round === newState.totalRounds) {
+      newState.completed = this._checkTournamentComplete(newState);
     }
+
+    console.log(
+      `MonradFormat: Updated ${resolvedMatches.length} waiting matches`
+    );
 
     return {
       state: newState,
       updatedMatches,
-      newMatches,
+      newMatches: [], // We don't create new matches, just resolve existing ones
       tournamentComplete: newState.completed,
     };
   }
 
   getStandings(state, groups = []) {
     const standings = this._calculateCurrentStandings(state);
-
-    return {
-      type: 'progressive',
-      currentRound: state.currentRound,
-      totalRounds: state.totalRounds,
-      standings: standings.map((participant, index) => ({
-        position: index + 1,
-        participant_id: participant.participant_id,
-        name: participant.name,
-        wins: participant.wins,
-        losses: participant.losses,
-        current_level: participant.current_level,
-        trajectory: participant.trajectory, // 'up', 'down', 'stable'
-      })),
-    };
+    return [
+      {
+        type: 'progressive',
+        title: 'Current Standings',
+        data: standings,
+      },
+    ];
   }
 
   getNextPlayableMatches(state, matches) {
-    // For Monrad, we return existing matches that are ready to play
-    // New matches are generated in onMatchResult and saved to the database
-
-    const existingMatches = matches || [];
-
-    // Return matches that are ready to play
-    return existingMatches.filter((match) => match.status === 'ready');
+    // Return matches that have both participants determined and are ready to play
+    return matches.filter(
+      (match) =>
+        match.status === 'ready' &&
+        match.participant_a?.type === 'participant' &&
+        match.participant_b?.type === 'participant'
+    );
   }
 
   isComplete(state) {
     return state.completed;
   }
 
-  getFinalResults(state, groups = []) {
-    return this._calculateFinalPlacements(state);
+  getFinalResults(state) {
+    if (!state.completed) return null;
+    return this._calculateFinalStandings(state);
+  }
+
+  serialize(state) {
+    return JSON.stringify(state);
+  }
+
+  deserialize(blob) {
+    return JSON.parse(blob);
   }
 
   // Private helper methods
 
-  _calculateRounds(participantCount) {
-    // Typically 3-5 rounds depending on field size
-    if (participantCount <= 8) return 3;
-    if (participantCount <= 16) return 4;
-    return 5;
-  }
-
-  _sortParticipants(participants) {
-    return participants.sort((a, b) => {
-      if (a.seed && b.seed) return a.seed - b.seed;
-      if (a.seed && !b.seed) return -1;
-      if (!a.seed && b.seed) return 1;
-      return a.name.localeCompare(b.name);
-    });
-  }
-
-  _generateFirstRoundMatches(participants) {
+  _generateAllMatches(participants, totalRounds) {
     const matches = [];
-    let matchNumber = 1;
+    const participantCount = participants.length;
 
-    // Pair 1 vs N, 2 vs N-1, etc.
-    for (let i = 0; i < participants.length / 2; i++) {
-      const participantA = participants[i];
-      const participantB = participants[participants.length - 1 - i];
+    // Generate matches for all rounds
+    for (let round = 1; round <= totalRounds; round++) {
+      const roundMatches = this._generateRoundMatches(
+        participants,
+        round,
+        participantCount
+      );
+      matches.push(...roundMatches);
+    }
 
+    return matches;
+  }
+
+  _generateRoundMatches(participants, round, participantCount) {
+    const matches = [];
+    const matchPairs = this._getMonradPairs(participantCount, round);
+
+    matchPairs.forEach((pair, index) => {
+      const matchNumber = index + 1;
       const match = {
-        round: 1,
+        round,
         stage: 'main',
-        match_number: `R1M${matchNumber}`,
-        participant_a: {
-          type: 'participant',
-          participant_id: participantA._id,
-          name: participantA.name,
-        },
-        participant_b: {
-          type: 'participant',
-          participant_id: participantB._id,
-          name: participantB.name,
-        },
-        status: 'ready',
+        match_number: `R${round}M${matchNumber}`,
+        status: round === 1 ? 'ready' : 'pending', // Only Round 1 matches are initially ready
         dependency_matches: [],
         feeds_to_matches: [],
       };
 
+      if (round === 1) {
+        // Round 1: Use actual participants based on seeding
+        const participantA = participants[pair[0] - 1]; // Convert 1-based to 0-based
+        const participantB = participants[pair[1] - 1];
+
+        match.participant_a = {
+          type: 'participant',
+          participant_id: participantA._id,
+          name: participantA.name,
+        };
+        match.participant_b = {
+          type: 'participant',
+          participant_id: participantB._id,
+          name: participantB.name,
+        };
+      } else {
+        // Later rounds: Use placeholders that reference seed positions
+        match.participant_a = {
+          type: 'seed_position',
+          seed: pair[0],
+          name: `Seed ${pair[0]}`,
+        };
+        match.participant_b = {
+          type: 'seed_position',
+          seed: pair[1],
+          name: `Seed ${pair[1]}`,
+        };
+      }
+
       matches.push(match);
-      matchNumber++;
-    }
+    });
 
     return matches;
+  }
+
+  _getMonradPairs(participantCount, round) {
+    // Define the Monrad pairing structure for different participant counts and rounds
+    const pairingStructures = {
+      8: {
+        1: [
+          [1, 8],
+          [2, 7],
+          [3, 6],
+          [4, 5],
+        ],
+        2: [
+          [1, 4],
+          [2, 3],
+          [5, 8],
+          [6, 7],
+        ],
+        3: [
+          [1, 2],
+          [3, 4],
+          [5, 6],
+          [7, 8],
+        ],
+      },
+      16: {
+        1: [
+          [1, 16],
+          [2, 15],
+          [3, 14],
+          [4, 13],
+          [5, 12],
+          [6, 11],
+          [7, 10],
+          [8, 9],
+        ],
+        2: [
+          [1, 8],
+          [2, 7],
+          [3, 6],
+          [4, 5],
+          [9, 16],
+          [10, 15],
+          [11, 14],
+          [12, 13],
+        ],
+        3: [
+          [1, 4],
+          [2, 3],
+          [5, 8],
+          [6, 7],
+          [9, 12],
+          [10, 11],
+          [13, 16],
+          [14, 15],
+        ],
+        4: [
+          [1, 2],
+          [3, 4],
+          [5, 6],
+          [7, 8],
+          [9, 10],
+          [11, 12],
+          [13, 14],
+          [15, 16],
+        ],
+      },
+      // Add more structures as needed
+    };
+
+    const structure = pairingStructures[participantCount];
+    if (!structure || !structure[round]) {
+      throw new Error(
+        `Monrad pairing structure not defined for ${participantCount} participants, round ${round}`
+      );
+    }
+
+    return structure[round];
+  }
+
+  _initializeSeedPositions(participants) {
+    const seedPositions = {};
+    participants.forEach((participant, index) => {
+      seedPositions[index + 1] = {
+        participant_id: participant._id,
+        name: participant.name,
+        current_seed: index + 1,
+      };
+    });
+    return seedPositions;
+  }
+
+  _updateSeedPositions(state, completedMatch, matchResult) {
+    // Determine which seed positions the winner and loser should occupy
+    const matchPairs = this._getMonradPairs(
+      state.participantCount,
+      completedMatch.round
+    );
+    const matchIndex =
+      parseInt(
+        completedMatch.match_number.replace(`R${completedMatch.round}M`, '')
+      ) - 1;
+    const pair = matchPairs[matchIndex];
+
+    // Winner takes the lower seed, loser takes the higher seed
+    const lowerSeed = Math.min(pair[0], pair[1]);
+    const higherSeed = Math.max(pair[0], pair[1]);
+
+    // Update seed positions
+    state.seedPositions[lowerSeed] = {
+      participant_id: matchResult.winner_id,
+      name: matchResult.winner_name,
+      current_seed: lowerSeed,
+    };
+
+    state.seedPositions[higherSeed] = {
+      participant_id: matchResult.loser_id,
+      name: matchResult.loser_name,
+      current_seed: higherSeed,
+    };
+
+    console.log(
+      `MonradFormat: Updated seed positions - Winner (${matchResult.winner_name}) -> Seed ${lowerSeed}, Loser (${matchResult.loser_name}) -> Seed ${higherSeed}`
+    );
+  }
+
+  _resolveWaitingMatches(state, completedMatch) {
+    const updatedMatches = [];
+    const nextRound = completedMatch.round + 1;
+
+    if (nextRound > state.totalRounds) {
+      return updatedMatches; // No more rounds
+    }
+
+    console.log(
+      `MonradFormat: Looking for matches to resolve in round ${nextRound}`
+    );
+
+    // Return empty array - the server will handle the actual placeholder resolution
+    // We've moved the placeholder resolution logic to the server.js file
+    return updatedMatches;
+  }
+
+  _sortParticipants(participants) {
+    return participants.sort((a, b) => (a.seed || 999) - (b.seed || 999));
+  }
+
+  _calculateRounds(participantCount) {
+    // Monrad typically has log2(n) rounds
+    return Math.ceil(Math.log2(participantCount));
   }
 
   _initializeHistory(participants) {
@@ -208,8 +404,7 @@ class MonradFormat extends ITournamentFormat {
         wins: 0,
         losses: 0,
         opponents: [],
-        current_level: 1,
-        trajectory: 'stable',
+        current_seed: participant.seed || 999,
       };
     });
     return history;
@@ -220,134 +415,71 @@ class MonradFormat extends ITournamentFormat {
     const history = { ...newState.participantHistory };
 
     // Update winner
-    const winner = history[matchResult.winner_id];
-    winner.wins += 1;
-    winner.opponents.push(matchResult.loser_id);
-    winner.trajectory = 'up';
+    if (history[matchResult.winner_id]) {
+      history[matchResult.winner_id] = {
+        ...history[matchResult.winner_id],
+        wins: history[matchResult.winner_id].wins + 1,
+        opponents: [
+          ...history[matchResult.winner_id].opponents,
+          matchResult.loser_id,
+        ],
+      };
+    }
 
     // Update loser
-    const loser = history[matchResult.loser_id];
-    loser.losses += 1;
-    loser.opponents.push(matchResult.winner_id);
-    loser.trajectory = 'down';
+    if (history[matchResult.loser_id]) {
+      history[matchResult.loser_id] = {
+        ...history[matchResult.loser_id],
+        losses: history[matchResult.loser_id].losses + 1,
+        opponents: [
+          ...history[matchResult.loser_id].opponents,
+          matchResult.winner_id,
+        ],
+      };
+    }
 
     newState.participantHistory = history;
     return newState;
   }
 
-  _isRoundComplete(state, round) {
-    // Check if all matches in the current round are completed
-    // This should check against actual match data, not just return true
-    // For now, we'll implement a simple check
-    return true; // TODO: Implement proper round completion check
-  }
-
-  _generateNextRoundMatches(state, round) {
-    // For Monrad, we generate matches progressively
-    // Only create matches for players who are ready to play
-
-    const participants = Object.values(state.participantHistory);
-    const sortedByRecord = this._sortByMonradRecord(participants);
-
-    const matches = [];
-    let matchNumber = 1;
-    const paired = new Set();
-
-    // For the first round, pair all players
-    if (round === 1) {
-      for (let i = 0; i < sortedByRecord.length; i += 2) {
-        if (i + 1 < sortedByRecord.length) {
-          const match = {
-            round,
-            stage: 'main',
-            match_number: `R${round}M${matchNumber}`,
-            participant_a: {
-              type: 'participant',
-              participant_id: sortedByRecord[i].participant_id,
-              name: sortedByRecord[i].name,
-            },
-            participant_b: {
-              type: 'participant',
-              participant_id: sortedByRecord[i + 1].participant_id,
-              name: sortedByRecord[i + 1].name,
-            },
-            status: 'ready',
-            dependency_matches: [],
-            feeds_to_matches: [],
-          };
-          matches.push(match);
-          matchNumber++;
-        }
-      }
-    } else {
-      // For subsequent rounds, we need to be more careful
-      // Only generate matches for players who have completed their previous round
-      // For now, let's generate matches for all players but mark them as 'pending'
-      // until their previous round matches are complete
-
-      // Create placeholder matches that will be populated as players become available
-      for (let i = 0; i < sortedByRecord.length; i += 2) {
-        if (i + 1 < sortedByRecord.length) {
-          const match = {
-            round,
-            stage: 'main',
-            match_number: `R${round}M${matchNumber}`,
-            participant_a: {
-              type: 'participant',
-              participant_id: sortedByRecord[i].participant_id,
-              name: sortedByRecord[i].name,
-            },
-            participant_b: {
-              type: 'participant',
-              participant_id: sortedByRecord[i + 1].participant_id,
-              name: sortedByRecord[i + 1].name,
-            },
-            status: 'ready',
-            dependency_matches: [],
-            feeds_to_matches: [],
-          };
-          matches.push(match);
-          matchNumber++;
-        }
-      }
-    }
-
-    return matches;
-  }
-
-  _sortByMonradRecord(participants) {
-    return participants.sort((a, b) => {
-      // Sort by wins first, then by strength of opposition
-      if (a.wins !== b.wins) return b.wins - a.wins;
-      return 0; // Additional tiebreakers would go here
-    });
-  }
-
   _calculateCurrentStandings(state) {
     const participants = Object.values(state.participantHistory);
-    return this._sortByMonradRecord(participants);
-  }
 
-  _sortParticipants(participants) {
-    // Sort participants by seed (1, 2, 3, ...)
-    return participants.sort((a, b) => (a.seed || 0) - (b.seed || 0));
-  }
+    // Sort by current seed position (lower is better)
+    const standings = participants.sort((a, b) => {
+      const seedA = this._getCurrentSeed(state, a.participant_id);
+      const seedB = this._getCurrentSeed(state, b.participant_id);
+      return seedA - seedB;
+    });
 
-  _calculateRounds(participantCount) {
-    // Monrad typically runs for log2(n) rounds, minimum 3 rounds
-    return Math.max(3, Math.ceil(Math.log2(participantCount)));
-  }
-
-  _calculateFinalPlacements(state) {
-    const standings = this._calculateCurrentStandings(state);
     return standings.map((participant, index) => ({
       position: index + 1,
       participant_id: participant.participant_id,
       name: participant.name,
       wins: participant.wins,
       losses: participant.losses,
-      final_level: participant.current_level,
+      current_seed: this._getCurrentSeed(state, participant.participant_id),
     }));
+  }
+
+  _getCurrentSeed(state, participantId) {
+    // Find current seed position for this participant
+    for (const [seed, info] of Object.entries(state.seedPositions)) {
+      if (info.participant_id === participantId) {
+        return parseInt(seed);
+      }
+    }
+    return 999; // Fallback
+  }
+
+  _calculateFinalStandings(state) {
+    return this._calculateCurrentStandings(state);
+  }
+
+  _checkTournamentComplete(state) {
+    // Tournament is complete when all matches in the final round are done
+    // This would need to be checked against actual match data
+    return false; // Placeholder
   }
 }
 
