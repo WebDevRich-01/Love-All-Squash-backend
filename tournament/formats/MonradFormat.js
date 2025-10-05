@@ -1,4 +1,5 @@
 const ITournamentFormat = require('../ITournamentFormat');
+const mongoose = require('mongoose');
 
 /**
  * Monrad (Progressive Consolation) Tournament Format
@@ -29,10 +30,8 @@ class MonradFormat extends ITournamentFormat {
       errors.push('Maximum 32 participants recommended for Monrad');
     }
 
-    // Must be even number for pairing
-    if (participants.length % 2 !== 0) {
-      errors.push('Even number of participants required for Monrad');
-    }
+    // Allow odd numbers - we'll add a bye player automatically
+    // No longer require even numbers
 
     return {
       valid: errors.length === 0,
@@ -42,22 +41,28 @@ class MonradFormat extends ITournamentFormat {
 
   generateInitialState(config, participants) {
     const sortedParticipants = this._sortParticipants(participants);
-    const totalRounds = this._calculateRounds(sortedParticipants.length);
+
+    // Handle non-standard tournament sizes by adding bye players
+    const adjustedParticipants =
+      this._adjustParticipantsForMonrad(sortedParticipants);
+    const effectiveParticipantCount = adjustedParticipants.length;
+    const totalRounds = this._calculateRounds(effectiveParticipantCount);
 
     console.log(
-      `MonradFormat: Generating initial state for ${sortedParticipants.length} participants, ${totalRounds} rounds`
+      `MonradFormat: Generating initial state for ${sortedParticipants.length} participants (adjusted to ${effectiveParticipantCount}), ${totalRounds} rounds`
     );
 
     // Generate ALL matches for ALL rounds with placeholders
-    const matches = this._generateAllMatches(sortedParticipants, totalRounds);
+    const matches = this._generateAllMatches(adjustedParticipants, totalRounds);
 
     const state = {
       format: 'monrad',
-      participantCount: participants.length,
+      participantCount: participants.length, // Original count
+      effectiveParticipantCount, // Adjusted count with byes
       totalRounds,
       currentRound: 1,
-      participantHistory: this._initializeHistory(sortedParticipants),
-      seedPositions: this._initializeSeedPositions(sortedParticipants),
+      participantHistory: this._initializeHistory(adjustedParticipants),
+      seedPositions: this._initializeSeedPositions(adjustedParticipants),
       completed: false,
     };
 
@@ -178,6 +183,47 @@ class MonradFormat extends ITournamentFormat {
 
   // Private helper methods
 
+  _adjustParticipantsForMonrad(participants) {
+    const supportedSizes = [8, 16, 32];
+    const actualCount = participants.length;
+
+    // Find the smallest supported size that can accommodate all participants
+    let targetSize = supportedSizes.find((size) => size >= actualCount);
+
+    // If no supported size can accommodate (>32), truncate to 32 and warn
+    if (!targetSize) {
+      targetSize = 32;
+      console.warn(
+        `MonradFormat: ${actualCount} participants exceeds maximum. Using first 32 participants.`
+      );
+      return participants.slice(0, 32); // Take only first 32 participants
+    }
+
+    // If we already have the exact supported size, return as-is
+    if (actualCount === targetSize) {
+      return participants;
+    }
+
+    // Add bye players to reach target size
+    const adjustedParticipants = [...participants];
+    const byeCount = targetSize - actualCount;
+
+    console.log(
+      `MonradFormat: Adding ${byeCount} bye players to reach ${targetSize} participants`
+    );
+
+    for (let i = 1; i <= byeCount; i++) {
+      adjustedParticipants.push({
+        _id: new mongoose.Types.ObjectId(), // Generate proper ObjectId for bye players
+        name: `BYE ${i}`,
+        type: 'bye',
+        seed: 999 + i, // Put byes at the end
+      });
+    }
+
+    return adjustedParticipants;
+  }
+
   _generateAllMatches(participants, totalRounds) {
     const matches = [];
     const participantCount = participants.length;
@@ -215,16 +261,38 @@ class MonradFormat extends ITournamentFormat {
         const participantA = participants[pair[0] - 1]; // Convert 1-based to 0-based
         const participantB = participants[pair[1] - 1];
 
+        // Handle bye matches
+        const isByeMatch =
+          participantA.type === 'bye' || participantB.type === 'bye';
+
         match.participant_a = {
-          type: 'participant',
+          type: participantA.type === 'bye' ? 'bye' : 'participant',
           participant_id: participantA._id,
           name: participantA.name,
         };
         match.participant_b = {
-          type: 'participant',
+          type: participantB.type === 'bye' ? 'bye' : 'participant',
           participant_id: participantB._id,
           name: participantB.name,
         };
+
+        // Bye matches are automatically completed
+        if (isByeMatch) {
+          match.status = 'completed';
+          const winner =
+            participantA.type !== 'bye' ? participantA : participantB;
+          const loser =
+            participantA.type === 'bye' ? participantA : participantB;
+          match.result = {
+            winner_participant_id: winner._id,
+            winner_name: winner.name,
+            loser_participant_id: loser.type === 'bye' ? null : loser._id,
+            loser_name: loser.type === 'bye' ? 'BYE' : loser.name,
+            game_scores: [],
+            walkover: true,
+            walkover_reason: 'Bye - automatic advancement',
+          };
+        }
       } else {
         // Later rounds: Use placeholders that reference seed positions
         match.participant_a = {
@@ -430,7 +498,7 @@ class MonradFormat extends ITournamentFormat {
   _updateSeedPositions(state, completedMatch, matchResult) {
     // Determine which seed positions the winner and loser should occupy
     const matchPairs = this._getMonradPairs(
-      state.participantCount,
+      state.effectiveParticipantCount || state.participantCount,
       completedMatch.round
     );
     const matchIndex =
@@ -450,11 +518,14 @@ class MonradFormat extends ITournamentFormat {
       current_seed: lowerSeed,
     };
 
-    state.seedPositions[higherSeed] = {
-      participant_id: matchResult.loser_id,
-      name: matchResult.loser_name,
-      current_seed: higherSeed,
-    };
+    // Only update loser position if it's not a bye
+    if (matchResult.loser_id && matchResult.loser_name !== 'BYE') {
+      state.seedPositions[higherSeed] = {
+        participant_id: matchResult.loser_id,
+        name: matchResult.loser_name,
+        current_seed: higherSeed,
+      };
+    }
 
     console.log(
       `MonradFormat: Updated seed positions - Winner (${matchResult.winner_name}) -> Seed ${lowerSeed}, Loser (${matchResult.loser_name}) -> Seed ${higherSeed}`
