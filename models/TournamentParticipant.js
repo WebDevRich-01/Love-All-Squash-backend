@@ -25,9 +25,10 @@ const tournamentParticipantSchema = new mongoose.Schema({
   created_at: { type: Date, default: Date.now },
 });
 
-// Compound index for efficient queries
+// Compound indexes for efficient queries
 tournamentParticipantSchema.index({ tournament_id: 1, seed: 1 });
 tournamentParticipantSchema.index({ tournament_id: 1, group_id: 1 });
+tournamentParticipantSchema.index({ tournament_id: 1, name: 1 }, { unique: true });
 
 module.exports = mongoose.model(
   'TournamentParticipant',

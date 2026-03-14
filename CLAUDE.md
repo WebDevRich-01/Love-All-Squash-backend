@@ -22,7 +22,7 @@ NODE_ENV=development
 
 ## Architecture
 
-All routes are defined in `server.js` (single file). MongoDB models are in `models/`. Tournament logic is isolated in `tournament/`.
+`server.js` handles app bootstrap (middleware, DB connection, server start). Routes live in `routes/`. MongoDB models are in `models/`. Tournament logic is isolated in `tournament/`.
 
 ### Tournament Engine
 
@@ -45,8 +45,8 @@ All routes are defined in `server.js` (single file). MongoDB models are in `mode
 | `monrad` | Monrad (Swiss-style) |
 | `pools_knockout` | Pools + Knockout |
 
-### Monrad / Dynamic Bracket Notes
-Monrad matches use `seed_position` placeholders for participants not yet determined. After each round's results are submitted, `processMatchResult` resolves these placeholders into real participants. Don't hardcode participant IDs in match documents for Monrad — always go through the engine.
+### Monrad / Swiss Pairing Notes
+Monrad uses true Swiss pairing — all Round 1 participants are known up-front (no placeholders). Later rounds are generated dynamically when the previous round completes. Player state (wins, losses, opponents, game points) is maintained in `state_blob.players`.
 
 ### Tournament State
 Tournament state is serialised as a JSON blob (`state_blob`) in the `Tournament` document. The engine reads/writes this blob on every operation. It is the source of truth for bracket progression — don't modify it directly.
@@ -55,7 +55,10 @@ Tournament state is serialised as a JSON blob (`state_blob`) in the `Tournament`
 
 | File | Purpose |
 |------|---------|
-| `server.js` | Express app, middleware, all API routes |
+| `server.js` | Express app, middleware, DB connection, server startup |
+| `routes/matches.js` | Match CRUD routes |
+| `routes/events.js` | Event CRUD routes |
+| `routes/tournaments.js` | Tournament routes (factory function, receives engine + logger) |
 | `tournament/TournamentEngine.js` | Format orchestration |
 | `tournament/ITournamentFormat.js` | Format interface |
 | `tournament/formats/` | Individual format implementations |

@@ -30,14 +30,17 @@ class TournamentEngine {
   }
 
   /**
-   * Get all available tournament formats
+   * Get supported tournament formats (excludes formats not yet production-ready)
    * @returns {Array} Array of format objects with id and name
    */
   getAvailableFormats() {
-    return Array.from(this.formats.values()).map((format) => ({
-      id: format.id,
-      name: format.name,
-    }));
+    const supported = new Set(['single_elimination', 'monrad']);
+    return Array.from(this.formats.values())
+      .filter((format) => supported.has(format.id))
+      .map((format) => ({
+        id: format.id,
+        name: format.name,
+      }));
   }
 
   /**
@@ -100,10 +103,11 @@ class TournamentEngine {
     state,
     tournamentMatch,
     matchResult,
-    groups = []
+    groups = [],
+    allMatches = []
   ) {
     const format = this.getFormat(formatId);
-    return format.onMatchResult(state, tournamentMatch, matchResult, groups);
+    return format.onMatchResult(state, tournamentMatch, matchResult, groups, allMatches);
   }
 
   /**

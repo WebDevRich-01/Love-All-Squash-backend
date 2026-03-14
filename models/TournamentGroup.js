@@ -61,5 +61,6 @@ tournamentGroupSchema.pre('save', function (next) {
 });
 
 tournamentGroupSchema.index({ tournament_id: 1, stage: 1 });
+tournamentGroupSchema.index({ tournament_id: 1, name: 1 }, { unique: true });
 
 module.exports = mongoose.model('TournamentGroup', tournamentGroupSchema);

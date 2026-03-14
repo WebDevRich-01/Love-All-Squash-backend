@@ -20,7 +20,7 @@ const tournamentMatchSchema = new mongoose.Schema({
   participant_a: {
     type: {
       type: String,
-      enum: ['participant', 'qualifier', 'bye', 'seed_position'],
+      enum: ['participant', 'qualifier', 'bye', 'seed_position', 'tbd'],
       default: 'participant',
     },
     participant_id: {
@@ -35,7 +35,7 @@ const tournamentMatchSchema = new mongoose.Schema({
   participant_b: {
     type: {
       type: String,
-      enum: ['participant', 'qualifier', 'bye', 'seed_position'],
+      enum: ['participant', 'qualifier', 'bye', 'seed_position', 'tbd'],
       default: 'participant',
     },
     participant_id: {
@@ -103,5 +103,7 @@ tournamentMatchSchema.index({ tournament_id: 1, status: 1 });
 tournamentMatchSchema.index({ tournament_id: 1, round: 1, stage: 1 });
 tournamentMatchSchema.index({ tournament_id: 1, scheduled_at: 1 });
 tournamentMatchSchema.index({ tournament_id: 1, group_id: 1 });
+tournamentMatchSchema.index({ 'participant_a.participant_id': 1 });
+tournamentMatchSchema.index({ 'participant_b.participant_id': 1 });
 
 module.exports = mongoose.model('TournamentMatch', tournamentMatchSchema);

@@ -42,7 +42,7 @@ class SingleEliminationFormat extends ITournamentFormat {
     };
   }
 
-  generateInitialState(config, participants) {
+  generateInitialState(config = {}, participants) {
     const drawSize = this._getDrawSize(participants.length);
     const byeCount = drawSize - participants.length;
 
@@ -74,7 +74,7 @@ class SingleEliminationFormat extends ITournamentFormat {
     return { state, matches, groups: [] };
   }
 
-  onMatchResult(state, tournamentMatch, matchResult) {
+  onMatchResult(state, tournamentMatch, matchResult, groups = [], allMatches = []) {
     const updatedMatches = [];
     const newMatches = [];
 
@@ -97,7 +97,7 @@ class SingleEliminationFormat extends ITournamentFormat {
 
     // Advance winner to next round if not final
     if (tournamentMatch.round < state.totalRounds) {
-      const nextRoundMatch = this._findNextRoundMatch(state, tournamentMatch);
+      const nextRoundMatch = this._findNextRoundMatch(tournamentMatch, allMatches);
       if (nextRoundMatch) {
         const updatedNextMatch = this._updateNextRoundMatch(
           nextRoundMatch,
@@ -125,9 +125,15 @@ class SingleEliminationFormat extends ITournamentFormat {
       }
     }
 
-    // Update state
+    // Update state — merge allMatches with this round's updates to check completion
+    const effectiveMatches = allMatches.map((m) => {
+      const updated = updatedMatches.find(
+        (u) => u._id && m._id && u._id.toString() === m._id.toString()
+      );
+      return updated || m;
+    });
     const newState = { ...state };
-    if (this._isRoundComplete(state, tournamentMatch.round)) {
+    if (this._isRoundComplete(tournamentMatch.round, effectiveMatches)) {
       newState.currentRound += 1;
     }
 
@@ -270,27 +276,41 @@ class SingleEliminationFormat extends ITournamentFormat {
   }
 
   _generateInitialMatches(seededDraw, drawSize) {
+    const totalRounds = Math.log2(drawSize);
     const matches = [];
-    let matchNumber = 1;
 
-    // Generate first round matches
-    for (let i = 0; i < drawSize; i += 2) {
-      const participantA = seededDraw[i];
-      const participantB = seededDraw[i + 1];
-
-      const match = {
+    // Round 1: real participants (with byes auto-completed)
+    const r1Count = drawSize / 2;
+    for (let i = 0; i < r1Count; i++) {
+      const participantA = seededDraw[i * 2];
+      const participantB = seededDraw[i * 2 + 1];
+      matches.push({
         round: 1,
         stage: 'main',
-        match_number: `R1M${matchNumber}`,
+        match_number: `R1M${i + 1}`,
         participant_a: this._createMatchParticipant(participantA),
         participant_b: this._createMatchParticipant(participantB),
         status: this._getInitialMatchStatus(participantA, participantB),
         dependency_matches: [],
         feeds_to_matches: [],
-      };
+      });
+    }
 
-      matches.push(match);
-      matchNumber++;
+    // Later rounds: TBD pending matches (bracket slots pre-allocated)
+    for (let round = 2; round <= totalRounds; round++) {
+      const roundCount = drawSize / Math.pow(2, round);
+      for (let i = 0; i < roundCount; i++) {
+        matches.push({
+          round,
+          stage: 'main',
+          match_number: `R${round}M${i + 1}`,
+          participant_a: { type: 'tbd', name: 'TBD' },
+          participant_b: { type: 'tbd', name: 'TBD' },
+          status: 'pending',
+          dependency_matches: [],
+          feeds_to_matches: [],
+        });
+      }
     }
 
     return matches;
@@ -324,37 +344,41 @@ class SingleEliminationFormat extends ITournamentFormat {
     return 'ready';
   }
 
-  _findNextRoundMatch(state, currentMatch) {
-    // Calculate which match in the next round this feeds into
-    const currentMatchIndex =
-      parseInt(currentMatch.match_number.substring(3)) - 1;
-    const nextRoundMatchIndex = Math.floor(currentMatchIndex / 2);
-    return { round: currentMatch.round + 1, match_index: nextRoundMatchIndex };
+  _findNextRoundMatch(currentMatch, allMatches) {
+    // Parse "RxMy" → match number y
+    const parts = currentMatch.match_number.match(/R\d+M(\d+)/);
+    if (!parts) return null;
+    const currentMatchNum = parseInt(parts[1]);
+    const nextRound = currentMatch.round + 1;
+    const nextMatchNum = Math.ceil(currentMatchNum / 2);
+    const nextMatchNumber = `R${nextRound}M${nextMatchNum}`;
+    return allMatches.find(
+      (m) => m.match_number === nextMatchNumber && m.round === nextRound
+    ) || null;
   }
 
   _updateNextRoundMatch(nextMatch, winnerId, winnerName, sourceMatch) {
-    const isFirstParticipant =
-      sourceMatch.match_number.endsWith('1') ||
-      sourceMatch.match_number.endsWith('3') ||
-      sourceMatch.match_number.endsWith('5') ||
-      sourceMatch.match_number.endsWith('7');
+    // Odd-numbered matches feed into slot A, even-numbered into slot B
+    const parts = sourceMatch.match_number.match(/R\d+M(\d+)/);
+    const currentMatchNum = parts ? parseInt(parts[1]) : 1;
+    const participantSlot = currentMatchNum % 2 === 1 ? 'participant_a' : 'participant_b';
 
-    const participantSlot = isFirstParticipant
-      ? 'participant_a'
-      : 'participant_b';
-
-    return {
+    const updated = {
       ...nextMatch,
       [participantSlot]: {
         type: 'participant',
         participant_id: winnerId,
         name: winnerName,
       },
-      status:
-        nextMatch.participant_a && nextMatch.participant_b
-          ? 'ready'
-          : 'pending',
     };
+
+    // Determine if the other slot is now filled (not TBD)
+    const otherSlot = participantSlot === 'participant_a' ? 'participant_b' : 'participant_a';
+    const otherParticipant = updated[otherSlot];
+    const otherFilled = otherParticipant && otherParticipant.type === 'participant';
+
+    updated.status = otherFilled ? 'ready' : 'pending';
+    return updated;
   }
 
   _createConsolationMatch(loserId, loserName, sourceMatch) {
@@ -362,9 +386,14 @@ class SingleEliminationFormat extends ITournamentFormat {
     return null; // Simplified for MVP
   }
 
-  _isRoundComplete(state, round) {
-    // Check if all matches in the round are completed
-    return true; // Simplified implementation
+  _isRoundComplete(round, allMatches) {
+    const roundMatches = allMatches.filter(
+      (m) => m.round === round && m.stage === 'main'
+    );
+    if (roundMatches.length === 0) return false;
+    return roundMatches.every(
+      (m) => m.status === 'completed' || m.status === 'walkover'
+    );
   }
 
   _checkTournamentComplete(state) {

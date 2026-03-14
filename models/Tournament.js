@@ -10,8 +10,6 @@ const tournamentSchema = new mongoose.Schema({
       'round_robin',
       'monrad',
       'pools_knockout',
-      'double_elimination',
-      'swiss',
     ],
   },
   status: {
@@ -86,5 +84,8 @@ tournamentSchema.pre('save', function (next) {
   this.updated_at = new Date();
   next();
 });
+
+tournamentSchema.index({ status: 1, created_at: -1 });
+tournamentSchema.index({ format: 1 });
 
 module.exports = mongoose.model('Tournament', tournamentSchema);
