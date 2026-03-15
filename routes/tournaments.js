@@ -78,6 +78,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
             participant_b: match.participant_b,
             status: match.status,
             group_id: match.group_id,
+            result: match.result,
           }).save()
         )
       );
