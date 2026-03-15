@@ -1,11 +1,44 @@
 const { Router } = require('express');
+const bcrypt = require('bcryptjs');
 const Tournament = require('../models/Tournament');
 const TournamentParticipant = require('../models/TournamentParticipant');
 const TournamentMatch = require('../models/TournamentMatch');
 const TournamentGroup = require('../models/TournamentGroup');
 const validate = require('../middleware/validate');
 const requireAdmin = require('../middleware/auth');
-const { tournamentSchema, matchResultSchema } = require('../schemas/index');
+const {
+  tournamentSchema,
+  verifyPassphraseSchema,
+  startTournamentSchema,
+  tournamentUpdateSchema,
+  participantUpdateSchema,
+  matchResultSchema,
+} = require('../schemas/index');
+
+// Helper: verify passphrase against tournament's stored hash
+async function checkPassphrase(tournament, passphrase) {
+  if (!tournament.passphrase) return false;
+  return bcrypt.compare(passphrase, tournament.passphrase);
+}
+
+// Helper: create match documents from engine output
+async function createMatchDocs(matches, tournamentId) {
+  return Promise.all(
+    matches.map((match) =>
+      new TournamentMatch({
+        tournament_id: tournamentId,
+        round: match.round,
+        stage: match.stage,
+        match_number: match.match_number,
+        participant_a: match.participant_a,
+        participant_b: match.participant_b,
+        status: match.status,
+        group_id: match.group_id,
+        result: match.result,
+      }).save()
+    )
+  );
+}
 
 /**
  * @param {object} tournamentEngine - TournamentEngine instance
@@ -24,17 +57,18 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
-  // POST / — create tournament
-  router.post('/', requireAdmin, validate(tournamentSchema), async (req, res) => {
+  // POST / — create tournament (saves as draft, no matches generated yet)
+  router.post('/', validate(tournamentSchema), async (req, res) => {
     try {
-      const { name, format, config, participants, start_date, end_date, venue, description } = req.body;
+      const { name, format, config, participants, start_date, end_date, venue, description, passphrase } = req.body;
 
-      const validation = tournamentEngine.validateTournament(format, config, participants);
-      if (!validation.valid) {
-        return res.status(400).json({ error: 'Tournament validation failed', details: validation.errors });
-      }
+      const passphraseHash = await bcrypt.hash(passphrase, 10);
 
-      const tournament = new Tournament({ name, format, config, start_date, end_date, venue, description, status: 'draft' });
+      const tournament = new Tournament({
+        name, format, config, start_date, end_date, venue, description,
+        passphrase: passphraseHash,
+        status: 'draft',
+      });
       await tournament.save();
 
       const participantDocs = await Promise.all(
@@ -49,7 +83,46 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
         )
       );
 
-      const initialState = tournamentEngine.generateTournament(format, config, participantDocs);
+      res.status(201).json({ tournament, participants: participantDocs, matches: [] });
+    } catch (error) {
+      logger.error({ err: error }, 'Error creating tournament');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /:id/verify-passphrase — check passphrase without performing an action
+  router.post('/:id/verify-passphrase', validate(verifyPassphraseSchema), async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      res.json({ valid: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /:id/start — generate matches and move draft → active
+  router.post('/:id/start', validate(startTournamentSchema), async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+      if (tournament.status !== 'draft') return res.status(400).json({ error: 'Tournament has already been started' });
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      const participants = await TournamentParticipant.find({ tournament_id: tournament._id });
+
+      const validation = tournamentEngine.validateTournament(tournament.format, tournament.config, participants);
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Tournament validation failed', details: validation.errors });
+      }
+
+      const initialState = tournamentEngine.generateTournament(tournament.format, tournament.config, participants);
 
       tournament.state_blob = initialState.state;
       tournament.status = 'active';
@@ -67,25 +140,114 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
         );
       }
 
-      const matchDocs = await Promise.all(
-        initialState.matches.map((match) =>
-          new TournamentMatch({
-            tournament_id: tournament._id,
-            round: match.round,
-            stage: match.stage,
-            match_number: match.match_number,
-            participant_a: match.participant_a,
-            participant_b: match.participant_b,
-            status: match.status,
-            group_id: match.group_id,
-            result: match.result,
-          }).save()
-        )
-      );
+      const matchDocs = await createMatchDocs(initialState.matches, tournament._id);
 
-      res.status(201).json({ tournament, participants: participantDocs, matches: matchDocs });
+      res.json({ tournament, participants, matches: matchDocs });
     } catch (error) {
-      logger.error({ err: error }, 'Error creating tournament');
+      logger.error({ err: error }, 'Error starting tournament');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PATCH /:id — update tournament details
+  //   Draft: all fields + full participant replacement
+  //   Active: metadata only (name, dates, venue, description)
+  router.patch('/:id', validate(tournamentUpdateSchema), async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      const { name, format, config, start_date, end_date, venue, description, participants } = req.body;
+
+      // Fields editable in both states
+      if (name !== undefined) tournament.name = name;
+      if (start_date !== undefined) tournament.start_date = start_date || undefined;
+      if (end_date !== undefined) tournament.end_date = end_date || undefined;
+      if (venue !== undefined) tournament.venue = venue || undefined;
+      if (description !== undefined) tournament.description = description || undefined;
+
+      if (tournament.status === 'draft') {
+        if (format !== undefined) tournament.format = format;
+        if (config !== undefined) {
+          // Update config sub-paths directly to avoid clobbering Mongoose schema defaults
+          // on sibling fields (groups, knockout) that were never explicitly set
+          if (config.match !== undefined) tournament.set('config.match', config.match);
+          if (config.courts !== undefined) tournament.set('config.courts', config.courts);
+          if (config.min_rest_minutes !== undefined) tournament.set('config.min_rest_minutes', config.min_rest_minutes);
+          if (config.allow_walkovers !== undefined) tournament.set('config.allow_walkovers', config.allow_walkovers);
+        }
+
+        // Replace participants if provided
+        if (participants && participants.length > 0) {
+          await TournamentParticipant.deleteMany({ tournament_id: tournament._id });
+          await Promise.all(
+            participants.map((p) =>
+              new TournamentParticipant({
+                tournament_id: tournament._id,
+                name: p.name,
+                seed: p.seed,
+                club: p.club,
+                color: p.color || 'border-blue-500',
+              }).save()
+            )
+          );
+        }
+      }
+
+      await tournament.save();
+
+      const updatedParticipants = await TournamentParticipant.find({ tournament_id: tournament._id });
+      res.json({ tournament, participants: updatedParticipants });
+    } catch (error) {
+      logger.error({ err: error }, 'Error updating tournament');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PATCH /:id/participants/:participantId — rename a participant (substitutions)
+  router.patch('/:id/participants/:participantId', validate(participantUpdateSchema), async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      const participant = await TournamentParticipant.findOneAndUpdate(
+        { _id: req.params.participantId, tournament_id: tournament._id },
+        { name: req.body.name },
+        { new: true }
+      );
+      if (!participant) return res.status(404).json({ error: 'Participant not found' });
+
+      // Also update name in state_blob (Monrad keeps names there)
+      if (tournament.state_blob && tournament.state_blob.players) {
+        const players = tournament.state_blob.players.map((p) =>
+          p.id === req.params.participantId ? { ...p, name: req.body.name } : p
+        );
+        tournament.state_blob = { ...tournament.state_blob, players };
+        tournament.markModified('state_blob');
+        await tournament.save();
+      }
+
+      // Update any match documents that reference this participant's name
+      await Promise.all([
+        TournamentMatch.updateMany(
+          { tournament_id: tournament._id, 'participant_a.participant_id': participant._id },
+          { $set: { 'participant_a.name': req.body.name } }
+        ),
+        TournamentMatch.updateMany(
+          { tournament_id: tournament._id, 'participant_b.participant_id': participant._id },
+          { $set: { 'participant_b.name': req.body.name } }
+        ),
+      ]);
+
+      res.json({ participant });
+    } catch (error) {
+      logger.error({ err: error }, 'Error updating participant');
       res.status(500).json({ error: error.message });
     }
   });

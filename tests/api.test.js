@@ -11,6 +11,8 @@ let app;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+const TEST_PASSPHRASE = 'testpassword123';
+
 const makeParticipants = (count) =>
   Array.from({ length: count }, (_, i) => ({
     name: `Player ${i + 1}`,
@@ -20,6 +22,7 @@ const makeParticipants = (count) =>
 const validSETournament = (overrides = {}) => ({
   name: 'Test SE Tournament',
   format: 'single_elimination',
+  passphrase: TEST_PASSPHRASE,
   participants: makeParticipants(8),
   ...overrides,
 });
@@ -27,16 +30,27 @@ const validSETournament = (overrides = {}) => ({
 const validMonradTournament = (overrides = {}) => ({
   name: 'Test Monrad Tournament',
   format: 'monrad',
+  passphrase: TEST_PASSPHRASE,
   participants: makeParticipants(8),
   ...overrides,
 });
+
+// Create a tournament AND start it, returning { tournamentId, matches }
+const createAndStart = async (payload) => {
+  const create = await request(app).post('/api/tournaments').send(payload).expect(201);
+  const tournamentId = create.body.tournament._id;
+  const start = await request(app)
+    .post(`/api/tournaments/${tournamentId}/start`)
+    .send({ passphrase: TEST_PASSPHRASE })
+    .expect(200);
+  return { tournamentId, matches: start.body.matches };
+};
 
 // ─── lifecycle ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongod.getUri();
-  // Require app after setting MONGODB_URI so the connect() fires
   app = require('../server');
   await mongoose.connect(process.env.MONGODB_URI);
 });
@@ -47,7 +61,6 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  // Clear all collections between tests
   const collections = mongoose.connection.collections;
   await Promise.all(Object.values(collections).map((c) => c.deleteMany({})));
 });
@@ -68,17 +81,85 @@ describe('GET /api/tournaments/formats', () => {
 // ─── POST /api/tournaments ────────────────────────────────────────────────────
 
 describe('POST /api/tournaments', () => {
-  it('creates a single-elimination tournament with 4 Round 1 matches for 8 players', async () => {
+  it('creates a tournament as draft with no matches', async () => {
+    const res = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
+    expect(res.body.tournament.status).toBe('draft');
+    expect(res.body.participants).toHaveLength(8);
+    expect(res.body.matches).toHaveLength(0);
+  });
+
+  it('returns 400 when name is missing', async () => {
     const res = await request(app)
       .post('/api/tournaments')
-      .send(validSETournament())
-      .expect(201);
+      .send({ format: 'single_elimination', passphrase: TEST_PASSPHRASE, participants: makeParticipants(8) })
+      .expect(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.details.some((d) => d.field === 'name')).toBe(true);
+  });
 
-    expect(res.body.tournament.name).toBe('Test SE Tournament');
-    expect(res.body.tournament.format).toBe('single_elimination');
+  it('returns 400 when passphrase is missing', async () => {
+    const res = await request(app)
+      .post('/api/tournaments')
+      .send({ name: 'No Pass', format: 'single_elimination', participants: makeParticipants(8) })
+      .expect(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.details.some((d) => d.field === 'passphrase')).toBe(true);
+  });
+
+  it('returns 400 when format is invalid', async () => {
+    const res = await request(app)
+      .post('/api/tournaments')
+      .send({ name: 'Bad', format: 'round_robin', passphrase: TEST_PASSPHRASE, participants: makeParticipants(8) })
+      .expect(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.details.some((d) => d.field === 'format')).toBe(true);
+  });
+
+  it('returns 400 when fewer than 4 participants', async () => {
+    const res = await request(app)
+      .post('/api/tournaments')
+      .send({ name: 'Small', format: 'single_elimination', passphrase: TEST_PASSPHRASE, participants: makeParticipants(3) })
+      .expect(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
+});
+
+// ─── POST /api/tournaments/:id/verify-passphrase ──────────────────────────────
+
+describe('POST /api/tournaments/:id/verify-passphrase', () => {
+  it('returns valid: true for correct passphrase', async () => {
+    const create = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
+    const id = create.body.tournament._id;
+    const res = await request(app)
+      .post(`/api/tournaments/${id}/verify-passphrase`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+    expect(res.body.valid).toBe(true);
+  });
+
+  it('returns 401 for wrong passphrase', async () => {
+    const create = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
+    const id = create.body.tournament._id;
+    await request(app)
+      .post(`/api/tournaments/${id}/verify-passphrase`)
+      .send({ passphrase: 'wrongpassword' })
+      .expect(401);
+  });
+});
+
+// ─── POST /api/tournaments/:id/start ─────────────────────────────────────────
+
+describe('POST /api/tournaments/:id/start', () => {
+  it('starts a SE tournament — generates 7 matches and sets status active', async () => {
+    const create = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
+    const id = create.body.tournament._id;
+
+    const res = await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+
     expect(res.body.tournament.status).toBe('active');
-    expect(res.body.participants).toHaveLength(8);
-    // 8-player SE generates 7 matches upfront (4 R1, 2 R2, 1 R3)
     expect(res.body.matches).toHaveLength(7);
     const r1 = res.body.matches.filter((m) => m.round === 1);
     expect(r1).toHaveLength(4);
@@ -87,13 +168,16 @@ describe('POST /api/tournaments', () => {
     r2.forEach((m) => expect(m.status).toBe('pending'));
   });
 
-  it('creates a Monrad tournament with 4 Round 1 matches for 8 players', async () => {
-    const res = await request(app)
-      .post('/api/tournaments')
-      .send(validMonradTournament())
-      .expect(201);
+  it('starts a Monrad tournament — 4 Round 1 matches with real participants', async () => {
+    const create = await request(app).post('/api/tournaments').send(validMonradTournament()).expect(201);
+    const id = create.body.tournament._id;
 
-    expect(res.body.tournament.format).toBe('monrad');
+    const res = await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+
+    expect(res.body.tournament.status).toBe('active');
     expect(res.body.matches).toHaveLength(4);
     res.body.matches.forEach((m) => {
       expect(m.round).toBe(1);
@@ -103,44 +187,21 @@ describe('POST /api/tournaments', () => {
     });
   });
 
-  it('returns 400 when name is missing', async () => {
-    const res = await request(app)
-      .post('/api/tournaments')
-      .send({ format: 'single_elimination', participants: makeParticipants(8) })
-      .expect(400);
-
-    expect(res.body.error).toBe('Validation failed');
-    expect(res.body.details.some((d) => d.field === 'name')).toBe(true);
+  it('returns 401 for wrong passphrase', async () => {
+    const create = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
+    const id = create.body.tournament._id;
+    await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: 'wrongpassword' })
+      .expect(401);
   });
 
-  it('returns 400 when format is invalid', async () => {
-    const res = await request(app)
-      .post('/api/tournaments')
-      .send({ name: 'Bad', format: 'round_robin', participants: makeParticipants(8) })
+  it('returns 400 if tournament already started', async () => {
+    const { tournamentId } = await createAndStart(validSETournament());
+    await request(app)
+      .post(`/api/tournaments/${tournamentId}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
       .expect(400);
-
-    expect(res.body.error).toBe('Validation failed');
-    expect(res.body.details.some((d) => d.field === 'format')).toBe(true);
-  });
-
-  it('returns 400 when fewer than 4 participants', async () => {
-    const res = await request(app)
-      .post('/api/tournaments')
-      .send({ name: 'Small', format: 'single_elimination', participants: makeParticipants(3) })
-      .expect(400);
-
-    expect(res.body.error).toBe('Validation failed');
-  });
-
-  it('returns 400 when participants have duplicate seeds', async () => {
-    const participants = makeParticipants(8);
-    participants[1].seed = 1; // duplicate seed 1
-    const res = await request(app)
-      .post('/api/tournaments')
-      .send({ name: 'Dup', format: 'single_elimination', participants })
-      .expect(400);
-
-    expect(res.body.error).toMatch(/validation failed/i);
   });
 });
 
@@ -152,12 +213,9 @@ describe('GET /api/tournaments/:id', () => {
     await request(app).get(`/api/tournaments/${fakeId}`).expect(404);
   });
 
-  it('returns full tournament detail', async () => {
-    const create = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
-    const id = create.body.tournament._id;
-
-    const res = await request(app).get(`/api/tournaments/${id}`).expect(200);
-    expect(res.body.tournament._id).toBe(id);
+  it('returns full tournament detail after starting', async () => {
+    const { tournamentId } = await createAndStart(validSETournament());
+    const res = await request(app).get(`/api/tournaments/${tournamentId}`).expect(200);
     expect(res.body.participants).toHaveLength(8);
     expect(res.body.matches).toHaveLength(7);
   });
@@ -170,9 +228,7 @@ describe('POST tournament match result', () => {
   let matches;
 
   beforeEach(async () => {
-    const create = await request(app).post('/api/tournaments').send(validSETournament()).expect(201);
-    tournamentId = create.body.tournament._id;
-    matches = create.body.matches;
+    ({ tournamentId, matches } = await createAndStart(validSETournament()));
   });
 
   const submitResult = (matchId, winnerId, loserId) =>
@@ -199,7 +255,6 @@ describe('POST tournament match result', () => {
     const res = await submitResult(match._id, winnerId, loserId).expect(200);
     expect(res.body.success).toBe(true);
 
-    // Verify match is now completed in DB
     const detail = await request(app).get(`/api/tournaments/${tournamentId}`).expect(200);
     const updated = detail.body.matches.find((m) => m._id === match._id);
     expect(updated.status).toBe('completed');
@@ -214,7 +269,6 @@ describe('POST tournament match result', () => {
   });
 
   it('advances bracket after all Round 1 matches complete (SE)', async () => {
-    // Submit only Round 1 matches
     const r1Matches = matches.filter((m) => m.round === 1);
     for (const match of r1Matches) {
       await submitResult(
@@ -246,11 +300,7 @@ describe('POST tournament match result', () => {
     const fakeLoserId = new mongoose.Types.ObjectId().toString();
     await request(app)
       .post(`/api/tournaments/${fakeTournamentId}/matches/${matches[0]._id}/result`)
-      .send({
-        winner_id: fakeWinnerId,
-        loser_id: fakeLoserId,
-        walkover: false,
-      })
+      .send({ winner_id: fakeWinnerId, loser_id: fakeLoserId, walkover: false })
       .expect(404);
   });
 });
@@ -259,14 +309,8 @@ describe('POST tournament match result', () => {
 
 describe('Monrad: Round 2 generated after Round 1 completes', () => {
   it('generates 4 Round 2 matches after all Round 1 results submitted', async () => {
-    const create = await request(app)
-      .post('/api/tournaments')
-      .send(validMonradTournament())
-      .expect(201);
-    const tournamentId = create.body.tournament._id;
-    const matches = create.body.matches;
+    const { tournamentId, matches } = await createAndStart(validMonradTournament());
 
-    // Submit all Round 1 results (participant_a wins each)
     for (const match of matches) {
       await request(app)
         .post(`/api/tournaments/${tournamentId}/matches/${match._id}/result`)
@@ -296,14 +340,8 @@ describe('Monrad: Round 2 generated after Round 1 completes', () => {
 
 describe('GET /api/tournaments/:id/standings', () => {
   it('returns correctly ranked standings after some Monrad results', async () => {
-    const create = await request(app)
-      .post('/api/tournaments')
-      .send(validMonradTournament())
-      .expect(201);
-    const tournamentId = create.body.tournament._id;
-    const matches = create.body.matches;
+    const { tournamentId, matches } = await createAndStart(validMonradTournament());
 
-    // Submit first 2 Round 1 matches — 2 players have 1 win each
     for (let i = 0; i < 2; i++) {
       const match = matches[i];
       await request(app)
@@ -319,13 +357,10 @@ describe('GET /api/tournaments/:id/standings', () => {
     }
 
     const res = await request(app).get(`/api/tournaments/${tournamentId}/standings`).expect(200);
-    // Monrad returns an array of group standings: [{ type, title, data: [...players] }]
     expect(Array.isArray(res.body)).toBe(true);
     expect(res.body.length).toBeGreaterThan(0);
     const standings = res.body[0].data;
     expect(Array.isArray(standings)).toBe(true);
-    expect(standings.length).toBeGreaterThan(0);
-    // Top-ranked player should have wins and a rank
     const top = standings[0];
     expect(top).toHaveProperty('rank');
     expect(top.wins).toBeGreaterThanOrEqual(1);

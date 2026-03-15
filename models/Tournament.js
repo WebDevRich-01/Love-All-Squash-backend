@@ -69,6 +69,7 @@ const tournamentSchema = new mongoose.Schema({
   end_date: Date,
   venue: String,
   description: String,
+  passphrase: String, // bcrypt hash — set at creation, required for edits
 
   // Format-specific state (opaque blob)
   state_blob: { type: mongoose.Schema.Types.Mixed, default: {} },

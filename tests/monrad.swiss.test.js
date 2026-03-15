@@ -91,15 +91,15 @@ describe('MonradFormat', () => {
         expect(result.matches.every((m) => m.status === 'ready')).toBe(true);
       });
 
-      it('pairs by adjacent seeding (1v2, 3v4, 5v6, 7v8)', () => {
+      it('pairs by top-vs-bottom seeding (1v8, 2v7, 3v6, 4v5)', () => {
         const pairs = result.matches.map((m) => [
           m.participant_a.name,
           m.participant_b.name,
         ]);
-        expect(pairs[0]).toEqual(['Player 1', 'Player 2']);
-        expect(pairs[1]).toEqual(['Player 3', 'Player 4']);
-        expect(pairs[2]).toEqual(['Player 5', 'Player 6']);
-        expect(pairs[3]).toEqual(['Player 7', 'Player 8']);
+        expect(pairs[0]).toEqual(['Player 1', 'Player 8']);
+        expect(pairs[1]).toEqual(['Player 2', 'Player 7']);
+        expect(pairs[2]).toEqual(['Player 3', 'Player 6']);
+        expect(pairs[3]).toEqual(['Player 4', 'Player 5']);
       });
 
       it('sets correct totalRounds', () => {
