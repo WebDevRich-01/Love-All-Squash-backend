@@ -66,8 +66,8 @@ class MonradFormat extends ITournamentFormat {
       opponents: [],
     }));
 
-    // Generate Round 1 pairings
-    const pairs = this._generatePairings(players);
+    // Generate Round 1 pairings using top-vs-bottom seeding (1vN, 2vN-1, ...)
+    const pairs = this._generateSeededRound1Pairings(players);
 
     // Apply bye wins to players before creating state
     players = this._applyByesToPlayers(players, pairs);
@@ -242,6 +242,31 @@ class MonradFormat extends ITournamentFormat {
       }
       return p;
     });
+  }
+
+  /**
+   * Round 1 seeded pairing: pair top half against bottom half in reverse.
+   * 1vN, 2vN-1, 3vN-2, ...
+   * If odd number of players, lowest seed gets a bye first.
+   */
+  _generateSeededRound1Pairings(players) {
+    // Players are already sorted by seed ascending
+    const sorted = [...players];
+    const pairs = [];
+
+    // Handle odd draw: lowest seed (last) gets a bye
+    if (sorted.length % 2 !== 0) {
+      const byePlayer = sorted.pop();
+      pairs.push({ bye: true, playerId: byePlayer.id });
+    }
+
+    // Pair first vs last, second vs second-to-last, etc.
+    const half = sorted.length / 2;
+    for (let i = 0; i < half; i++) {
+      pairs.push({ playerAId: sorted[i].id, playerBId: sorted[sorted.length - 1 - i].id });
+    }
+
+    return pairs;
   }
 
   /**
