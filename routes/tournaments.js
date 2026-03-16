@@ -149,6 +149,34 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
+  // POST /:id/reset — clear all results and return to draft so the organiser can edit before restarting
+  router.post('/:id/reset', validate(startTournamentSchema), async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+      if (tournament.status === 'draft') return res.status(400).json({ error: 'Tournament has not been started yet' });
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      // Wipe all match and group data
+      await TournamentMatch.deleteMany({ tournament_id: tournament._id });
+      await TournamentGroup.deleteMany({ tournament_id: tournament._id });
+
+      // Return to draft — organiser can edit players/settings then click Start again
+      tournament.state_blob = undefined;
+      tournament.status = 'draft';
+      await tournament.save();
+
+      const participants = await TournamentParticipant.find({ tournament_id: tournament._id });
+
+      res.json({ tournament, participants, matches: [] });
+    } catch (error) {
+      logger.error({ err: error }, 'Error resetting tournament');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // PATCH /:id — update tournament details
   //   Draft: all fields + full participant replacement
   //   Active: metadata only (name, dates, venue, description)
