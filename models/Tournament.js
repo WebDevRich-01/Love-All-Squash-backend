@@ -24,6 +24,7 @@ const tournamentSchema = new mongoose.Schema({
       best_of: { type: Number, default: 5 },
       points_to_win: { type: Number, default: 15 },
       clear_points: { type: Number, default: 2 },
+      is_handicap: { type: Boolean, default: false },
       scoring: {
         type: String,
         default: 'traditional',

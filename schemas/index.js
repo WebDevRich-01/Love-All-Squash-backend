@@ -46,6 +46,7 @@ const matchConfigSchema = z
         best_of: z.number().int().min(1).max(9).optional(),
         points_to_win: z.number().int().min(1).max(99).optional(),
         clear_points: z.number().int().min(0).max(10).optional(),
+        is_handicap: z.boolean().optional(),
       })
       .optional(),
   })
