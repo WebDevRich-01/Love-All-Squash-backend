@@ -189,6 +189,30 @@ class MonradFormat extends ITournamentFormat {
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   /**
+   * Full tiebreaker sort used for handicap pairings and standings:
+   *   1. Wins DESC
+   *   2. Points difference DESC  (pointsFor - pointsAgainst)
+   *   3. Points won DESC         (pointsFor)
+   *   4. Draw position ASC       (seed — lower seed = higher position in draw)
+   */
+  _rankPlayers(players) {
+    return [...players].sort((a, b) => {
+      const winDiff = b.wins - a.wins;
+      if (winDiff !== 0) return winDiff;
+
+      const diffA = a.gamePointsFor - a.gamePointsAgainst;
+      const diffB = b.gamePointsFor - b.gamePointsAgainst;
+      const ptsDiff = diffB - diffA;
+      if (ptsDiff !== 0) return ptsDiff;
+
+      const ptsWonDiff = b.gamePointsFor - a.gamePointsFor;
+      if (ptsWonDiff !== 0) return ptsWonDiff;
+
+      return a.seed - b.seed;
+    });
+  }
+
+  /**
    * Update player win/loss/game-point stats after a real match result.
    * (Bye wins are handled separately in _applyByesToPlayers.)
    */
@@ -350,14 +374,7 @@ class MonradFormat extends ITournamentFormat {
    *   Round 4: groups of 2    →  direct final pairs
    */
   _generateHandicapPairings(players, roundNumber, totalPlayers) {
-    // Re-rank: wins DESC → points diff DESC
-    const ranked = [...players].sort((a, b) => {
-      const winDiff = b.wins - a.wins;
-      if (winDiff !== 0) return winDiff;
-      const diffA = a.gamePointsFor - a.gamePointsAgainst;
-      const diffB = b.gamePointsFor - b.gamePointsAgainst;
-      return diffB - diffA;
-    });
+    const ranked = this._rankPlayers(players);
 
     // Group size halves every round starting from N at round 1
     const groupSize = Math.max(2, Math.round(totalPlayers / Math.pow(2, roundNumber - 1)));
@@ -461,15 +478,7 @@ class MonradFormat extends ITournamentFormat {
    * Return players sorted by standing for display/results.
    */
   _sortedStandings(players) {
-    const sorted = [...players].sort((a, b) => {
-      const winDiff = b.wins - a.wins;
-      if (winDiff !== 0) return winDiff;
-      const diffA = a.gamePointsFor - a.gamePointsAgainst;
-      const diffB = b.gamePointsFor - b.gamePointsAgainst;
-      const gpDiff = diffB - diffA;
-      if (gpDiff !== 0) return gpDiff;
-      return a.seed - b.seed;
-    });
+    const sorted = this._rankPlayers(players);
 
     return sorted.map((p, i) => ({
       rank: i + 1,
