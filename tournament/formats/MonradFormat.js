@@ -46,12 +46,16 @@ class MonradFormat extends ITournamentFormat {
   }
 
   generateInitialState(config, participants) {
+    const isHandicap = !!(config && config.match && config.match.is_handicap);
+
     // Sort by seed ascending; unseeded participants go to end
+    // For handicap tournaments the seed reflects the user's chosen order (randomised/alphabetised)
     const sorted = [...participants].sort(
       (a, b) => (a.seed || 999) - (b.seed || 999)
     );
 
-    const totalRounds = Math.ceil(Math.log2(sorted.length));
+    const totalPlayers = sorted.length;
+    const totalRounds = Math.ceil(Math.log2(totalPlayers));
 
     // Build players array from participant documents
     let players = sorted.map((p, i) => ({
@@ -66,7 +70,7 @@ class MonradFormat extends ITournamentFormat {
       opponents: [],
     }));
 
-    // Generate Round 1 pairings using top-vs-bottom seeding (1vN, 2vN-1, ...)
+    // Round 1: top-vs-bottom pairing (same for both modes — seeds reflect chosen order)
     const pairs = this._generateSeededRound1Pairings(players);
 
     // Apply bye wins to players before creating state
@@ -75,6 +79,8 @@ class MonradFormat extends ITournamentFormat {
     const state = {
       format: 'monrad',
       totalRounds,
+      totalPlayers,
+      isHandicap,
       currentRound: 1,
       completed: false,
       players,
@@ -131,7 +137,10 @@ class MonradFormat extends ITournamentFormat {
     if (roundComplete) {
       if (newState.currentRound < newState.totalRounds) {
         // Generate next round's pairings
-        const pairs = this._generatePairings(newState.players);
+        const nextRound = newState.currentRound + 1;
+        const pairs = newState.isHandicap
+          ? this._generateHandicapPairings(newState.players, nextRound, newState.totalPlayers)
+          : this._generatePairings(newState.players);
 
         // Update bye counts and give bye players their automatic win
         newState = {
@@ -323,6 +332,71 @@ class MonradFormat extends ITournamentFormat {
 
       const playerB = unpaired.splice(opponentIndex, 1)[0];
       pairs.push({ playerAId: playerA.id, playerBId: playerB.id });
+    }
+
+    return pairs;
+  }
+
+  /**
+   * Handicap pairing algorithm.
+   *
+   * Re-ranks all players by wins DESC → points diff DESC, then splits into
+   * groups whose size halves each round. Within each group the top half plays
+   * the bottom half. Rematches are avoided by swapping within the bottom half.
+   *
+   *   Round 1 (handled by _generateSeededRound1Pairings):  1vN/2+1, 2vN/2+2 …
+   *   Round 2: groups of N/2  →  within each group: top-quarter v bottom-quarter
+   *   Round 3: groups of N/4  →  pairs of 2 within each group
+   *   Round 4: groups of 2    →  direct final pairs
+   */
+  _generateHandicapPairings(players, roundNumber, totalPlayers) {
+    // Re-rank: wins DESC → points diff DESC
+    const ranked = [...players].sort((a, b) => {
+      const winDiff = b.wins - a.wins;
+      if (winDiff !== 0) return winDiff;
+      const diffA = a.gamePointsFor - a.gamePointsAgainst;
+      const diffB = b.gamePointsFor - b.gamePointsAgainst;
+      return diffB - diffA;
+    });
+
+    // Group size halves every round starting from N at round 1
+    const groupSize = Math.max(2, Math.round(totalPlayers / Math.pow(2, roundNumber - 1)));
+    const pairs = [];
+
+    for (let g = 0; g < ranked.length; g += groupSize) {
+      const group = [...ranked.slice(g, g + groupSize)];
+
+      // Odd group: give bye to lowest-ranked player who hasn't had one yet
+      if (group.length % 2 !== 0) {
+        let byeIdx = group.length - 1;
+        for (let j = group.length - 1; j >= 0; j--) {
+          if (group[j].byes === 0) { byeIdx = j; break; }
+        }
+        const [byePlayer] = group.splice(byeIdx, 1);
+        pairs.push({ bye: true, playerId: byePlayer.id });
+      }
+
+      const half = group.length / 2;
+      const topHalf = group.slice(0, half);
+      const bottomHalf = [...group.slice(half)];
+
+      // Pair each top-half player with a bottom-half player, avoiding rematches
+      for (let j = 0; j < half; j++) {
+        const playerA = topHalf[j];
+        // Find first available non-rematch from position j onwards in bottomHalf
+        let bIdx = j;
+        for (let k = j; k < bottomHalf.length; k++) {
+          if (!playerA.opponents.includes(bottomHalf[k].id)) {
+            bIdx = k;
+            break;
+          }
+        }
+        // Swap chosen opponent into position j so later iterations stay tidy
+        if (bIdx !== j) {
+          [bottomHalf[j], bottomHalf[bIdx]] = [bottomHalf[bIdx], bottomHalf[j]];
+        }
+        pairs.push({ playerAId: playerA.id, playerBId: bottomHalf[j].id });
+      }
     }
 
     return pairs;
