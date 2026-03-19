@@ -70,8 +70,12 @@ class MonradFormat extends ITournamentFormat {
       opponents: [],
     }));
 
-    // Round 1: top-vs-bottom pairing (same for both modes — seeds reflect chosen order)
-    const pairs = this._generateSeededRound1Pairings(players);
+    // Round 1 pairing:
+    //   Handicap: adjacent-halves (1vN/2+1, 2vN/2+2 …) — no seeding advantage
+    //   Standard: reverse (1vN, 2vN-1 …)               — top seed vs bottom seed
+    const pairs = isHandicap
+      ? this._generateHandicapPairings(players, 1, totalPlayers)
+      : this._generateSeededRound1Pairings(players);
 
     // Apply bye wins to players before creating state
     players = this._applyByesToPlayers(players, pairs);
