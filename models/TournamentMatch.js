@@ -75,6 +75,7 @@ const tournamentMatchSchema = new mongoose.Schema({
     },
     loser_name: String,
     game_scores: [{ player1: Number, player2: Number }],
+    handicap_starts: { player1: Number, player2: Number },
     walkover: { type: Boolean, default: false },
     walkover_reason: String,
     retired: { type: Boolean, default: false },

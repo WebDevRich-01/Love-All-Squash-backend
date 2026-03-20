@@ -109,6 +109,12 @@ const matchResultSchema = z
       .min(1)
       .max(5)
       .optional(),
+    handicap_starts: z
+      .object({
+        player1: z.number().int().min(-99).max(99),
+        player2: z.number().int().min(-99).max(99),
+      })
+      .optional(),
   })
   .refine((data) => data.winner_id !== data.loser_id, {
     message: 'winner_id and loser_id must be different',

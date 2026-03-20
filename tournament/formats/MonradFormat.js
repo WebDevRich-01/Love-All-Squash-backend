@@ -112,6 +112,7 @@ class MonradFormat extends ITournamentFormat {
         game_scores: matchResult.game_scores || [],
         walkover: matchResult.walkover || false,
         retired: matchResult.retired || false,
+        ...(matchResult.handicap_starts && { handicap_starts: matchResult.handicap_starts }),
       },
     };
 
@@ -228,16 +229,22 @@ class MonradFormat extends ITournamentFormat {
     const winnerIsA =
       tournamentMatch.participant_a?.participant_id?.toString() === winnerId;
 
-    // Accumulate game points from score array
+    // Accumulate game points from score array.
+    // For handicap matches, subtract each player's starting score so stats
+    // reflect actual points scored rather than raw final scoreboard values.
+    const h = matchResult.handicap_starts;
+    const p1StartOffset = h ? (h.player1 || 0) : 0;
+    const p2StartOffset = h ? (h.player2 || 0) : 0;
+
     let winnerPointsFor = 0;
     let winnerPointsAgainst = 0;
     (matchResult.game_scores || []).forEach((gs) => {
       if (winnerIsA) {
-        winnerPointsFor += gs.player1 || 0;
-        winnerPointsAgainst += gs.player2 || 0;
+        winnerPointsFor += (gs.player1 || 0) - p1StartOffset;
+        winnerPointsAgainst += (gs.player2 || 0) - p2StartOffset;
       } else {
-        winnerPointsFor += gs.player2 || 0;
-        winnerPointsAgainst += gs.player1 || 0;
+        winnerPointsFor += (gs.player2 || 0) - p2StartOffset;
+        winnerPointsAgainst += (gs.player1 || 0) - p1StartOffset;
       }
     });
 
