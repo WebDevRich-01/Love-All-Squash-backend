@@ -115,6 +115,7 @@ const matchResultSchema = z
         player2: z.number().int().min(-99).max(99),
       })
       .optional(),
+    passphrase: z.string().optional(),
   })
   .refine((data) => data.winner_id !== data.loser_id, {
     message: 'winner_id and loser_id must be different',

@@ -275,6 +275,137 @@ class MonradFormat extends ITournamentFormat {
   }
 
   /**
+   * Reverse the stats contribution of a previously recorded result.
+   * Used when editing a completed match result.
+   */
+  _reverseMatchStats(state, tournamentMatch, oldResult) {
+    const winnerId = oldResult.winner_participant_id?.toString();
+    const loserId = oldResult.loser_participant_id?.toString();
+    const winnerIsA =
+      tournamentMatch.participant_a?.participant_id?.toString() === winnerId;
+
+    const h = oldResult.handicap_starts;
+    const p1StartOffset = h ? (h.player1 || 0) : 0;
+    const p2StartOffset = h ? (h.player2 || 0) : 0;
+
+    let winnerPointsFor = 0;
+    let winnerPointsAgainst = 0;
+    (oldResult.game_scores || []).forEach((gs) => {
+      if (winnerIsA) {
+        winnerPointsFor += (gs.player1 || 0) - p1StartOffset;
+        winnerPointsAgainst += (gs.player2 || 0) - p2StartOffset;
+      } else {
+        winnerPointsFor += (gs.player2 || 0) - p2StartOffset;
+        winnerPointsAgainst += (gs.player1 || 0) - p1StartOffset;
+      }
+    });
+
+    const newPlayers = state.players.map((p) => {
+      const pid = p.id?.toString();
+      if (pid === winnerId) {
+        return {
+          ...p,
+          wins: Math.max(0, p.wins - 1),
+          gamePointsFor: p.gamePointsFor - winnerPointsFor,
+          gamePointsAgainst: p.gamePointsAgainst - winnerPointsAgainst,
+          opponents: p.opponents.filter((o) => o !== loserId),
+        };
+      }
+      if (pid === loserId) {
+        return {
+          ...p,
+          losses: Math.max(0, p.losses - 1),
+          gamePointsFor: p.gamePointsFor - winnerPointsAgainst,
+          gamePointsAgainst: p.gamePointsAgainst - winnerPointsFor,
+          opponents: p.opponents.filter((o) => o !== winnerId),
+        };
+      }
+      return p;
+    });
+
+    return { ...state, players: newPlayers };
+  }
+
+  /**
+   * Re-process a match result (edit scenario).
+   * Reverses old stats, applies new stats, and optionally regenerates
+   * subsequent rounds if none of their matches have been completed yet.
+   */
+  updateMatchResult(state, tournamentMatch, newMatchResult, allMatches) {
+    const matchData = tournamentMatch.toObject
+      ? tournamentMatch.toObject()
+      : { ...tournamentMatch };
+
+    const oldResult = matchData.result;
+
+    // Reverse old stats then apply new stats
+    let newState = oldResult
+      ? this._reverseMatchStats(state, matchData, oldResult)
+      : state;
+    newState = this._updatePlayerStats(newState, matchData, newMatchResult);
+
+    const updatedMatch = {
+      ...matchData,
+      result: {
+        winner_participant_id: newMatchResult.winner_id,
+        winner_name: newMatchResult.winner_name,
+        loser_participant_id: newMatchResult.loser_id,
+        loser_name: newMatchResult.loser_name,
+        game_scores: newMatchResult.game_scores || [],
+        walkover: newMatchResult.walkover || false,
+        retired: newMatchResult.retired || false,
+        ...(newMatchResult.handicap_starts && {
+          handicap_starts: newMatchResult.handicap_starts,
+        }),
+      },
+    };
+
+    const editedRound = matchData.round;
+    const laterMatches = allMatches.filter((m) => m.round > editedRound);
+    const hasCompletedLaterMatch = laterMatches.some(
+      (m) => m.status === 'completed' || m.status === 'walkover'
+    );
+
+    // If no later matches have been completed, delete them and regenerate
+    let deletedMatchIds = [];
+    let newMatches = [];
+
+    if (!hasCompletedLaterMatch && laterMatches.length > 0) {
+      deletedMatchIds = laterMatches.map((m) => m._id?.toString());
+
+      // Check if current round is fully complete after this edit
+      const thisRoundMatches = allMatches.filter((m) => m.round === editedRound);
+      const allRoundComplete = thisRoundMatches.every((m) => {
+        if (m._id?.toString() === matchData._id?.toString()) return true; // this match is being updated
+        return m.status === 'completed' || m.status === 'walkover';
+      });
+
+      if (allRoundComplete && editedRound < newState.totalRounds) {
+        const nextRound = editedRound + 1;
+        const pairs = newState.isHandicap
+          ? this._generateHandicapPairings(newState.players, nextRound, newState.totalPlayers)
+          : this._generatePairings(newState.players);
+        newState = {
+          ...newState,
+          currentRound: nextRound,
+          players: this._applyByesToPlayers(newState.players, pairs),
+        };
+        newMatches = this._pairsToMatches(pairs, newState.players, nextRound);
+      } else {
+        // Round not fully complete yet — just reset currentRound to edited round
+        newState = { ...newState, currentRound: editedRound, completed: false };
+      }
+    }
+
+    return {
+      state: newState,
+      updatedMatch,
+      deletedMatchIds,
+      newMatches,
+    };
+  }
+
+  /**
    * Apply automatic bye wins to players who received a bye this round.
    */
   _applyByesToPlayers(players, pairs) {

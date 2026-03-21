@@ -110,6 +110,11 @@ class TournamentEngine {
     return format.onMatchResult(state, tournamentMatch, matchResult, groups, allMatches);
   }
 
+  updateMatchResult(formatId, state, tournamentMatch, newMatchResult, allMatches = []) {
+    const format = this.getFormat(formatId);
+    return format.updateMatchResult(state, tournamentMatch, newMatchResult, allMatches);
+  }
+
   /**
    * Get current tournament standings
    * @param {string} formatId - Tournament format ID

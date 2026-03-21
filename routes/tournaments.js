@@ -409,6 +409,67 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   );
 
+  // PATCH /:tournamentId/matches/:matchId/result — edit a completed match result
+  router.patch(
+    '/:tournamentId/matches/:matchId/result',
+    validate(matchResultSchema),
+    async (req, res) => {
+      try {
+        const { tournamentId, matchId } = req.params;
+
+        const tournament = await Tournament.findById(tournamentId);
+        if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+        const valid = await checkPassphrase(tournament, req.body.passphrase);
+        if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+        const tournamentMatch = await TournamentMatch.findById(matchId);
+        if (!tournamentMatch) return res.status(404).json({ error: 'Tournament match not found' });
+        if (tournamentMatch.status !== 'completed') {
+          return res.status(400).json({ error: 'Match is not completed' });
+        }
+
+        const allMatches = await TournamentMatch.find({ tournament_id: tournamentId });
+
+        const { passphrase: _p, ...matchResult } = req.body;
+        const result = tournamentEngine.updateMatchResult(
+          tournament.format,
+          tournament.state_blob,
+          tournamentMatch,
+          matchResult,
+          allMatches.map((m) => m.toObject())
+        );
+
+        tournament.state_blob = result.state;
+        tournament.status = 'active';
+        await tournament.save();
+
+        await TournamentMatch.findByIdAndUpdate(
+          matchId,
+          { $set: result.updatedMatch },
+          { new: true }
+        );
+
+        if (result.deletedMatchIds && result.deletedMatchIds.length > 0) {
+          await TournamentMatch.deleteMany({ _id: { $in: result.deletedMatchIds } });
+        }
+
+        if (result.newMatches && result.newMatches.length > 0) {
+          await Promise.all(
+            result.newMatches.map((match) =>
+              new TournamentMatch({ ...match, tournament_id: tournamentId }).save()
+            )
+          );
+        }
+
+        res.json({ success: true, message: 'Match result updated' });
+      } catch (error) {
+        logger.error({ err: error }, 'Error updating match result');
+        res.status(500).json({ error: error.message });
+      }
+    }
+  );
+
   // DELETE /:id — cascade delete
   router.delete('/:id', requireAdmin, async (req, res) => {
     try {
