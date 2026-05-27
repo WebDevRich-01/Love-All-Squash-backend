@@ -34,6 +34,8 @@ const tournamentGroupSchema = new mongoose.Schema({
       played: { type: Number, default: 0 },
       wins: { type: Number, default: 0 },
       losses: { type: Number, default: 0 },
+      draws: { type: Number, default: 0 },
+      league_points: { type: Number, default: 0 }, // 2 per win, 1 per draw
       games_won: { type: Number, default: 0 },
       games_lost: { type: Number, default: 0 },
       points_won: { type: Number, default: 0 },

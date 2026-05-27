@@ -80,6 +80,22 @@ const tournamentMatchSchema = new mongoose.Schema({
     walkover_reason: String,
     retired: { type: Boolean, default: false },
     retirement_reason: String,
+
+    // Team fixture fields (team_round_robin only)
+    string_results: [
+      {
+        string_number: Number,       // 1–5
+        team_a_games: Number,
+        team_b_games: Number,
+        team_a_player: String,       // optional player names for display
+        team_b_player: String,
+        game_scores: [{ team_a: Number, team_b: Number }],
+      },
+    ],
+    team_a_games_total: Number,      // sum of games across all strings
+    team_b_games_total: Number,
+    team_a_league_points: Number,    // 2 for win, 1 for draw, 0 for loss
+    team_b_league_points: Number,
   },
 
   // Dependencies for bracket progression
@@ -92,6 +108,40 @@ const tournamentMatchSchema = new mongoose.Schema({
 
   // Group reference (for pools/round robin)
   group_id: { type: mongoose.Schema.Types.ObjectId, ref: 'TournamentGroup' },
+
+  // In-progress string scores saved before fixture is completed (team_round_robin only)
+  draft_string_results: [
+    {
+      string_number: Number,
+      team_a_games: Number,
+      team_b_games: Number,
+      team_a_player: String,
+      team_b_player: String,
+      game_scores: [{ team_a: Number, team_b: Number }],
+    },
+  ],
+
+  // Pre-match confirmed lineups (team_round_robin only)
+  team_a_confirmed: { type: Boolean, default: false },
+  team_b_confirmed: { type: Boolean, default: false },
+  team_a_lineup: [{ string_number: Number, player_name: String }],
+  team_b_lineup: [{ string_number: Number, player_name: String }],
+  team_a_racketball_player: String,
+  team_b_racketball_player: String,
+  team_a_beginner_player: String,
+  team_b_beginner_player: String,
+
+  // Results for extra matches (racketball / beginner)
+  racketball_result: {
+    team_a_games: Number,
+    team_b_games: Number,
+    game_scores: [{ team_a: Number, team_b: Number }],
+  },
+  beginner_result: {
+    team_a_games: Number,
+    team_b_games: Number,
+    game_scores: [{ team_a: Number, team_b: Number }],
+  },
 
   // Audit trail
   created_at: { type: Date, default: Date.now },

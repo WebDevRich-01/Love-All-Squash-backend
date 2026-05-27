@@ -12,7 +12,9 @@ const {
   startTournamentSchema,
   tournamentUpdateSchema,
   participantUpdateSchema,
+  rosterUpdateSchema,
   matchResultSchema,
+  teamFixtureResultSchema,
 } = require('../schemas/index');
 
 // Helper: verify passphrase against tournament's stored hash
@@ -22,7 +24,7 @@ async function checkPassphrase(tournament, passphrase) {
 }
 
 // Helper: create match documents from engine output
-async function createMatchDocs(matches, tournamentId) {
+async function createMatchDocs(matches, tournamentId, fixtureDates = {}) {
   return Promise.all(
     matches.map((match) =>
       new TournamentMatch({
@@ -35,6 +37,9 @@ async function createMatchDocs(matches, tournamentId) {
         status: match.status,
         group_id: match.group_id,
         result: match.result,
+        scheduled_at: match.match_number && fixtureDates[match.match_number]
+          ? new Date(fixtureDates[match.match_number])
+          : undefined,
       }).save()
     )
   );
@@ -63,24 +68,31 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const { name, format, config, participants, start_date, end_date, venue, description, passphrase } = req.body;
 
       const passphraseHash = await bcrypt.hash(passphrase, 10);
+      const tournament_type = format === 'team_round_robin' ? 'team' : 'individual';
 
       const tournament = new Tournament({
         name, format, config, start_date, end_date, venue, description,
         passphrase: passphraseHash,
+        tournament_type,
         status: 'draft',
       });
       await tournament.save();
 
       const participantDocs = await Promise.all(
-        participants.map((p) =>
-          new TournamentParticipant({
+        participants.map((p) => {
+          const doc = new TournamentParticipant({
             tournament_id: tournament._id,
             name: p.name,
             seed: p.seed,
             club: p.club,
             color: p.color || 'border-blue-500',
-          }).save()
-        )
+            roster: p.roster || [],
+            division_index: p.division_index,
+            is_pool: p.is_pool || p.player_type === 'pool' || false,
+          });
+          if (p.player_type) doc.player_type = p.player_type;
+          return doc.save();
+        })
       );
 
       res.status(201).json({ tournament, participants: participantDocs, matches: [] });
@@ -90,7 +102,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
-  // POST /:id/verify-passphrase — check passphrase without performing an action
+  // POST /:id/verify-passphrase
   router.post('/:id/verify-passphrase', validate(verifyPassphraseSchema), async (req, res) => {
     try {
       const tournament = await Tournament.findById(req.params.id);
@@ -128,8 +140,10 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       tournament.status = 'active';
       await tournament.save();
 
+      // Save groups and capture the real MongoDB ObjectIds
+      let groupIdMap = {}; // format string ID → real ObjectId
       if (initialState.groups && initialState.groups.length > 0) {
-        await Promise.all(
+        const savedGroups = await Promise.all(
           initialState.groups.map((group) =>
             new TournamentGroup({
               tournament_id: tournament._id,
@@ -138,9 +152,40 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
             }).save()
           )
         );
+
+        // Map format string IDs to real ObjectIds for use in match docs
+        initialState.groups.forEach((g, i) => {
+          groupIdMap[g._id] = savedGroups[i]._id;
+        });
+
+        // Initialise standings with team names (so they appear before any match is played)
+        await Promise.all(
+          initialState.groups.map((formatGroup, i) => {
+            const standings = formatGroup.participants.map((p) => ({
+              participant_id: p._id,
+              name: p.name,
+              position: 0,
+              played: 0,
+              wins: 0,
+              losses: 0,
+              draws: 0,
+              league_points: 0,
+              games_won: 0,
+              games_lost: 0,
+            }));
+            return TournamentGroup.findByIdAndUpdate(savedGroups[i]._id, { standings });
+          })
+        );
       }
 
-      const matchDocs = await createMatchDocs(initialState.matches, tournament._id);
+      // Resolve string group IDs → real ObjectIds in match documents
+      const resolvedMatches = initialState.matches.map((m) => ({
+        ...m,
+        group_id: m.group_id && groupIdMap[m.group_id] ? groupIdMap[m.group_id] : m.group_id,
+      }));
+
+      const fixtureDates = tournament.config?.fixture_dates || {};
+      const matchDocs = await createMatchDocs(resolvedMatches, tournament._id, fixtureDates);
 
       res.json({ tournament, participants, matches: matchDocs });
     } catch (error) {
@@ -149,7 +194,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
-  // POST /:id/reset — clear all results and return to draft so the organiser can edit before restarting
+  // POST /:id/reset — clear all results and return to draft
   router.post('/:id/reset', validate(startTournamentSchema), async (req, res) => {
     try {
       const tournament = await Tournament.findById(req.params.id);
@@ -159,11 +204,9 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const valid = await checkPassphrase(tournament, req.body.passphrase);
       if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
 
-      // Wipe all match and group data
       await TournamentMatch.deleteMany({ tournament_id: tournament._id });
       await TournamentGroup.deleteMany({ tournament_id: tournament._id });
 
-      // Return to draft — organiser can edit players/settings then click Start again
       tournament.state_blob = undefined;
       tournament.status = 'draft';
       await tournament.save();
@@ -178,8 +221,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
   });
 
   // PATCH /:id — update tournament details
-  //   Draft: all fields + full participant replacement
-  //   Active: metadata only (name, dates, venue, description)
   router.patch('/:id', validate(tournamentUpdateSchema), async (req, res) => {
     try {
       const tournament = await Tournament.findById(req.params.id);
@@ -190,7 +231,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
 
       const { name, format, config, start_date, end_date, venue, description, participants } = req.body;
 
-      // Fields editable in both states
       if (name !== undefined) tournament.name = name;
       if (start_date !== undefined) tournament.start_date = start_date || undefined;
       if (end_date !== undefined) tournament.end_date = end_date || undefined;
@@ -198,29 +238,36 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       if (description !== undefined) tournament.description = description || undefined;
 
       if (tournament.status === 'draft') {
-        if (format !== undefined) tournament.format = format;
+        if (format !== undefined) {
+          tournament.format = format;
+          tournament.tournament_type = format === 'team_round_robin' ? 'team' : 'individual';
+        }
         if (config !== undefined) {
-          // Update config sub-paths directly to avoid clobbering Mongoose schema defaults
-          // on sibling fields (groups, knockout) that were never explicitly set
           if (config.match !== undefined) tournament.set('config.match', config.match);
           if (config.courts !== undefined) tournament.set('config.courts', config.courts);
           if (config.min_rest_minutes !== undefined) tournament.set('config.min_rest_minutes', config.min_rest_minutes);
           if (config.allow_walkovers !== undefined) tournament.set('config.allow_walkovers', config.allow_walkovers);
+          if (config.divisions !== undefined) tournament.set('config.divisions', config.divisions);
+          if (config.fixture_dates !== undefined) tournament.set('config.fixture_dates', config.fixture_dates);
         }
 
-        // Replace participants if provided
         if (participants && participants.length > 0) {
           await TournamentParticipant.deleteMany({ tournament_id: tournament._id });
           await Promise.all(
-            participants.map((p) =>
-              new TournamentParticipant({
+            participants.map((p) => {
+              const doc = new TournamentParticipant({
                 tournament_id: tournament._id,
                 name: p.name,
                 seed: p.seed,
                 club: p.club,
                 color: p.color || 'border-blue-500',
-              }).save()
-            )
+                roster: p.roster || [],
+                division_index: p.division_index,
+                is_pool: p.is_pool || p.player_type === 'pool' || false,
+              });
+              if (p.player_type) doc.player_type = p.player_type;
+              return doc.save();
+            })
           );
         }
       }
@@ -235,7 +282,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
-  // PATCH /:id/participants/:participantId — rename a participant (substitutions)
+  // PATCH /:id/participants/:participantId — rename a participant / team
   router.patch('/:id/participants/:participantId', validate(participantUpdateSchema), async (req, res) => {
     try {
       const tournament = await Tournament.findById(req.params.id);
@@ -251,7 +298,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       );
       if (!participant) return res.status(404).json({ error: 'Participant not found' });
 
-      // Also update name in state_blob (Monrad keeps names there)
       if (tournament.state_blob && tournament.state_blob.players) {
         const players = tournament.state_blob.players.map((p) =>
           p.id === req.params.participantId ? { ...p, name: req.body.name } : p
@@ -261,7 +307,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
         await tournament.save();
       }
 
-      // Update any match documents that reference this participant's name
       await Promise.all([
         TournamentMatch.updateMany(
           { tournament_id: tournament._id, 'participant_a.participant_id': participant._id },
@@ -276,6 +321,65 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       res.json({ participant });
     } catch (error) {
       logger.error({ err: error }, 'Error updating participant');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PATCH /:id/participants/:participantId/roster — update team roster
+  router.patch('/:id/participants/:participantId/roster', validate(rosterUpdateSchema), async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+      if (tournament.tournament_type !== 'team') {
+        return res.status(400).json({ error: 'Roster management only applies to team tournaments' });
+      }
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      const participant = await TournamentParticipant.findOneAndUpdate(
+        { _id: req.params.participantId, tournament_id: tournament._id },
+        { roster: req.body.roster },
+        { new: true }
+      );
+      if (!participant) return res.status(404).json({ error: 'Team not found' });
+
+      res.json({ participant });
+    } catch (error) {
+      logger.error({ err: error }, 'Error updating roster');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /:id/participants — add a single participant (pool player)
+  router.post('/:id/participants', async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+      const valid = await checkPassphrase(tournament, req.body.passphrase);
+      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
+
+      const { name, seed, is_pool, player_type } = req.body;
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({ error: 'name is required' });
+      }
+
+      const participantData = {
+        tournament_id: tournament._id,
+        name: name.trim(),
+        seed,
+        is_pool: is_pool || player_type === 'pool' || false,
+        color: 'border-blue-500',
+        roster: [],
+      };
+      if (player_type) participantData.player_type = player_type;
+
+      const participant = await new TournamentParticipant(participantData).save();
+
+      res.status(201).json({ participant });
+    } catch (error) {
+      logger.error({ err: error }, 'Error adding participant');
       res.status(500).json({ error: error.message });
     }
   });
@@ -336,21 +440,156 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
+  // PATCH /:tournamentId/matches/:matchId/schedule — set or clear scheduled_at
+  router.patch('/:tournamentId/matches/:matchId/schedule', requireAdmin, async (req, res) => {
+    try {
+      const { tournamentId, matchId } = req.params;
+      const { scheduled_at } = req.body;
+
+      const match = await TournamentMatch.findOne({ _id: matchId, tournament_id: tournamentId });
+      if (!match) return res.status(404).json({ error: 'Match not found' });
+
+      match.scheduled_at = scheduled_at ? new Date(scheduled_at) : undefined;
+      await match.save();
+
+      res.json({ success: true, scheduled_at: match.scheduled_at });
+    } catch (error) {
+      logger.error({ err: error }, 'Error updating fixture schedule');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PATCH /:tournamentId/matches/:matchId/strings — persist in-progress string scores
+  // Saves draft results without touching standings or fixture status.
+  router.patch('/:tournamentId/matches/:matchId/strings', requireAdmin, async (req, res) => {
+    try {
+      const { tournamentId, matchId } = req.params;
+      const { strings } = req.body;
+
+      if (!Array.isArray(strings)) {
+        return res.status(400).json({ error: 'strings must be an array' });
+      }
+
+      const match = await TournamentMatch.findOne({ _id: matchId, tournament_id: tournamentId });
+      if (!match) return res.status(404).json({ error: 'Match not found' });
+      if (match.status === 'completed') {
+        return res.status(409).json({ error: 'Match is already completed — use the result endpoint to edit' });
+      }
+
+      match.draft_string_results = strings;
+      await match.save();
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error({ err: error }, 'Error saving draft strings');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PATCH /:tournamentId/matches/:matchId/extra-result — save racketball or beginner result (no auth)
+  router.patch('/:tournamentId/matches/:matchId/extra-result', async (req, res) => {
+    try {
+      const { tournamentId, matchId } = req.params;
+      const { match_type, team_a_games, team_b_games, game_scores } = req.body;
+
+      if (match_type !== 'racketball' && match_type !== 'beginner') {
+        return res.status(400).json({ error: 'match_type must be "racketball" or "beginner"' });
+      }
+
+      const match = await TournamentMatch.findOne({ _id: matchId, tournament_id: tournamentId });
+      if (!match) return res.status(404).json({ error: 'Match not found' });
+
+      const field = `${match_type}_result`;
+      match[field] = { team_a_games, team_b_games, game_scores: game_scores || [] };
+      match.markModified(field);
+      await match.save();
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error({ err: error }, 'Error saving extra match result');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PATCH /:tournamentId/matches/:matchId/lineup — save confirmed team lineup (no auth required)
+  router.patch('/:tournamentId/matches/:matchId/lineup', async (req, res) => {
+    try {
+      const { tournamentId, matchId } = req.params;
+      const { side, lineup } = req.body;
+
+      if (side !== 'a' && side !== 'b') {
+        return res.status(400).json({ error: 'side must be "a" or "b"' });
+      }
+      if (!Array.isArray(lineup)) {
+        return res.status(400).json({ error: 'lineup must be an array' });
+      }
+
+      const match = await TournamentMatch.findOne({ _id: matchId, tournament_id: tournamentId });
+      if (!match) return res.status(404).json({ error: 'Match not found' });
+
+      if (side === 'a') {
+        match.team_a_lineup = lineup;
+        match.team_a_confirmed = true;
+      } else {
+        match.team_b_lineup = lineup;
+        match.team_b_confirmed = true;
+      }
+
+      // Handle optional racketball and beginner players with auto-TBC logic
+      for (const type of ['racketball', 'beginner']) {
+        const fieldKey = `${type}_player`;
+        if (!(fieldKey in req.body)) continue;
+        const playerName = req.body[fieldKey] || null;
+        const ownField = `team_${side}_${type}_player`;
+        const otherSide = side === 'a' ? 'b' : 'a';
+        const otherField = `team_${otherSide}_${type}_player`;
+
+        match[ownField] = playerName;
+        if (playerName && !match[otherField]) {
+          match[otherField] = 'TBC';
+        } else if (!playerName && match[otherField] === 'TBC') {
+          match[otherField] = null;
+        }
+        match.markModified(ownField);
+        match.markModified(otherField);
+      }
+
+      await match.save();
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error({ err: error }, 'Error saving team lineup');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // POST /:tournamentId/matches/:matchId/result
+  // Handles both individual matches and team fixtures (selected by tournament type)
   router.post(
     '/:tournamentId/matches/:matchId/result',
     requireAdmin,
-    validate(matchResultSchema),
     async (req, res) => {
       try {
         const { tournamentId, matchId } = req.params;
-        const matchResult = req.body;
 
         const tournament = await Tournament.findById(tournamentId);
         if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
 
         const tournamentMatch = await TournamentMatch.findById(matchId);
         if (!tournamentMatch) return res.status(404).json({ error: 'Tournament match not found' });
+
+        if (tournamentMatch.status === 'completed' || tournamentMatch.status === 'walkover') {
+          return res.status(409).json({ error: 'Match result already recorded' });
+        }
+
+        // Validate body against the appropriate schema
+        const schema = tournament.tournament_type === 'team' ? teamFixtureResultSchema : matchResultSchema;
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: 'Validation failed', details: parsed.error.errors });
+        }
+
+        const matchResult = parsed.data;
 
         const [groups, allMatches] = await Promise.all([
           TournamentGroup.find({ tournament_id: tournamentId }),
@@ -391,6 +630,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
             result.standingsUpdates.map((update) =>
               TournamentGroup.findByIdAndUpdate(update.group_id, {
                 standings: update.standings,
+                completed: update.completed || false,
                 updated_at: new Date(),
               })
             )
@@ -412,7 +652,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
   // PATCH /:tournamentId/matches/:matchId/result — edit a completed match result
   router.patch(
     '/:tournamentId/matches/:matchId/result',
-    validate(matchResultSchema),
     async (req, res) => {
       try {
         const { tournamentId, matchId } = req.params;
@@ -429,14 +668,26 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
           return res.status(400).json({ error: 'Match is not completed' });
         }
 
-        const allMatches = await TournamentMatch.find({ tournament_id: tournamentId });
+        // Validate with the appropriate schema
+        const schema = tournament.tournament_type === 'team' ? teamFixtureResultSchema : matchResultSchema;
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: 'Validation failed', details: parsed.error.errors });
+        }
 
-        const { passphrase: _p, ...matchResult } = req.body;
-        const result = tournamentEngine.updateMatchResult(
+        const allMatches = await TournamentMatch.find({ tournament_id: tournamentId });
+        const { passphrase: _p, ...matchResult } = parsed.data;
+
+        const [groups] = await Promise.all([
+          TournamentGroup.find({ tournament_id: tournamentId }),
+        ]);
+
+        const result = tournamentEngine.processMatchResult(
           tournament.format,
           tournament.state_blob,
-          tournamentMatch,
+          tournamentMatch.toObject(),
           matchResult,
+          groups,
           allMatches.map((m) => m.toObject())
         );
 
@@ -444,20 +695,22 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
         tournament.status = 'active';
         await tournament.save();
 
-        await TournamentMatch.findByIdAndUpdate(
-          matchId,
-          { $set: result.updatedMatch },
-          { new: true }
-        );
-
-        if (result.deletedMatchIds && result.deletedMatchIds.length > 0) {
-          await TournamentMatch.deleteMany({ _id: { $in: result.deletedMatchIds } });
+        if (result.updatedMatches && result.updatedMatches.length > 0) {
+          await Promise.all(
+            result.updatedMatches.map(({ _id, ...fields }) =>
+              TournamentMatch.findByIdAndUpdate(_id, { $set: fields }, { new: true })
+            )
+          );
         }
 
-        if (result.newMatches && result.newMatches.length > 0) {
+        if (result.standingsUpdates && result.standingsUpdates.length > 0) {
           await Promise.all(
-            result.newMatches.map((match) =>
-              new TournamentMatch({ ...match, tournament_id: tournamentId }).save()
+            result.standingsUpdates.map((update) =>
+              TournamentGroup.findByIdAndUpdate(update.group_id, {
+                standings: update.standings,
+                completed: update.completed || false,
+                updated_at: new Date(),
+              })
             )
           );
         }

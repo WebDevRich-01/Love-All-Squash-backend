@@ -2,6 +2,7 @@ const SingleEliminationFormat = require('./formats/SingleEliminationFormat');
 const RoundRobinFormat = require('./formats/RoundRobinFormat');
 const MonradFormat = require('./formats/MonradFormat');
 const PoolsKnockoutFormat = require('./formats/PoolsKnockoutFormat');
+const TeamRoundRobinFormat = require('./formats/TeamRoundRobinFormat');
 
 /**
  * Tournament Engine - Manages tournament formats and operations
@@ -22,6 +23,7 @@ class TournamentEngine {
       new RoundRobinFormat(),
       new MonradFormat(),
       new PoolsKnockoutFormat(),
+      new TeamRoundRobinFormat(),
     ];
 
     formats.forEach((format) => {
@@ -34,7 +36,7 @@ class TournamentEngine {
    * @returns {Array} Array of format objects with id and name
    */
   getAvailableFormats() {
-    const supported = new Set(['single_elimination', 'monrad']);
+    const supported = new Set(['single_elimination', 'monrad', 'team_round_robin']);
     return Array.from(this.formats.values())
       .filter((format) => supported.has(format.id))
       .map((format) => ({

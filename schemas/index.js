@@ -1,5 +1,7 @@
 const { z } = require('zod');
 
+const FORMATS = ['single_elimination', 'monrad', 'team_round_robin'];
+
 // POST /api/matches
 const matchSchema = z.object({
   player1Name: z.string().min(1).max(100),
@@ -30,12 +32,29 @@ const eventSchema = z.object({
   name: z.string().min(1).max(100),
 });
 
-// Shared participant schema
+// Shared participant schema (covers both individual players and teams)
 const participantInputSchema = z.object({
   name: z.string().min(1).max(100),
   seed: z.number().int().min(1).optional(),
   club: z.string().max(100).optional(),
   color: z.string().max(100).optional(),
+  // Team roster — array of players by string number
+  roster: z
+    .array(
+      z.object({
+        player_name: z.string().min(1).max(100),
+        string_number: z.number().int().min(1).max(5),
+        is_captain: z.boolean().optional(),
+      })
+    )
+    .max(10)
+    .optional(),
+  // Team round robin: which division this participant belongs to (0-indexed)
+  division_index: z.number().int().min(0).optional(),
+  // Pool player (stand-in, not assigned to a team)
+  is_pool: z.boolean().optional(),
+  // Player type for non-team participants
+  player_type: z.enum(['pool', 'racketball', 'beginner']).optional(),
 });
 
 // Shared match config schema
@@ -49,15 +68,21 @@ const matchConfigSchema = z
         is_handicap: z.boolean().optional(),
       })
       .optional(),
+    divisions: z
+      .object({
+        count: z.number().int().min(1).max(8).optional(),
+      })
+      .optional(),
+    fixture_dates: z.record(z.string(), z.string()).optional(),
   })
   .optional();
 
 // POST /api/tournaments
 const tournamentSchema = z.object({
   name: z.string().min(1).max(100),
-  format: z.enum(['single_elimination', 'monrad']),
+  format: z.enum(FORMATS),
   passphrase: z.string().min(4).max(100),
-  participants: z.array(participantInputSchema).min(4).max(32),
+  participants: z.array(participantInputSchema).min(2).max(64),
   config: matchConfigSchema,
   start_date: z.string().optional(),
   end_date: z.string().optional(),
@@ -79,13 +104,13 @@ const startTournamentSchema = z.object({
 const tournamentUpdateSchema = z.object({
   passphrase: z.string().min(1),
   name: z.string().min(1).max(100).optional(),
-  format: z.enum(['single_elimination', 'monrad']).optional(),
+  format: z.enum(FORMATS).optional(),
   config: matchConfigSchema,
   start_date: z.string().optional(),
   end_date: z.string().optional(),
   venue: z.string().max(200).optional(),
   description: z.string().max(1000).optional(),
-  participants: z.array(participantInputSchema).min(4).max(32).optional(),
+  participants: z.array(participantInputSchema).min(2).max(64).optional(),
 });
 
 // PATCH /api/tournaments/:id/participants/:participantId
@@ -94,7 +119,19 @@ const participantUpdateSchema = z.object({
   name: z.string().min(1).max(100),
 });
 
-// POST /api/tournaments/:id/matches/:matchId/result
+// PATCH /api/tournaments/:id/participants/:participantId/roster
+const rosterUpdateSchema = z.object({
+  passphrase: z.string().min(1),
+  roster: z.array(
+    z.object({
+      player_name: z.string().min(1).max(100),
+      string_number: z.number().int().min(1).max(5),
+      is_captain: z.boolean().optional(),
+    })
+  ).min(1).max(10),
+});
+
+// POST /api/tournaments/:id/matches/:matchId/result (individual match)
 const matchResultSchema = z
   .object({
     winner_id: z.string().min(1),
@@ -102,8 +139,8 @@ const matchResultSchema = z
     game_scores: z
       .array(
         z.object({
-          player1: z.number().int().min(0).max(99),
-          player2: z.number().int().min(0).max(99),
+          player1: z.number().int().min(-99).max(999),
+          player2: z.number().int().min(-99).max(999),
         })
       )
       .min(1)
@@ -122,6 +159,37 @@ const matchResultSchema = z
     path: ['loser_id'],
   });
 
+// POST /api/tournaments/:id/matches/:matchId/result (team fixture)
+const teamFixtureResultSchema = z
+  .object({
+    winner_id: z.string().min(1),
+    loser_id: z.string().min(1),
+    winner_name: z.string().max(100).optional(),
+    loser_name: z.string().max(100).optional(),
+    team_a_games_total: z.number().int().min(0),
+    team_b_games_total: z.number().int().min(0),
+    string_results: z
+      .array(
+        z.object({
+          string_number: z.number().int().min(1).max(5),
+          team_a_games: z.number().int().min(0).max(5),
+          team_b_games: z.number().int().min(0).max(5),
+          team_a_player: z.string().max(100).optional(),
+          team_b_player: z.string().max(100).optional(),
+          game_scores: z
+            .array(z.object({ team_a: z.number().int().min(0), team_b: z.number().int().min(0) }))
+            .optional(),
+        })
+      )
+      .min(1)
+      .max(6),
+    passphrase: z.string().optional(),
+  })
+  .refine((data) => data.winner_id !== data.loser_id, {
+    message: 'winner_id and loser_id must be different',
+    path: ['loser_id'],
+  });
+
 module.exports = {
   matchSchema,
   eventSchema,
@@ -130,5 +198,7 @@ module.exports = {
   startTournamentSchema,
   tournamentUpdateSchema,
   participantUpdateSchema,
+  rosterUpdateSchema,
   matchResultSchema,
+  teamFixtureResultSchema,
 };

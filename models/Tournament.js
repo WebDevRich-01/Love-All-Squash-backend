@@ -10,7 +10,14 @@ const tournamentSchema = new mongoose.Schema({
       'round_robin',
       'monrad',
       'pools_knockout',
+      'team_round_robin',
     ],
+  },
+
+  tournament_type: {
+    type: String,
+    default: 'individual',
+    enum: ['individual', 'team'],
   },
   status: {
     type: String,
@@ -42,6 +49,11 @@ const tournamentSchema = new mongoose.Schema({
     knockout: {
       consolation: { type: Boolean, default: false },
       draw_size: Number, // null for auto-calculate
+    },
+
+    // Team round robin: how many divisions
+    divisions: {
+      count: { type: Number, default: 2 },
     },
 
     // Scheduling
