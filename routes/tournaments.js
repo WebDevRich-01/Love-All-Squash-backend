@@ -129,12 +129,18 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
 
       const participants = await TournamentParticipant.find({ tournament_id: tournament._id });
 
-      const validation = tournamentEngine.validateTournament(tournament.format, tournament.config, participants);
+      // For team_round_robin, only pass actual team participants to the engine;
+      // pool/racketball/beginner players are tournament metadata, not match participants.
+      const engineParticipants = tournament.format === 'team_round_robin'
+        ? participants.filter((p) => !p.is_pool && !p.player_type)
+        : participants;
+
+      const validation = tournamentEngine.validateTournament(tournament.format, tournament.config, engineParticipants);
       if (!validation.valid) {
         return res.status(400).json({ error: 'Tournament validation failed', details: validation.errors });
       }
 
-      const initialState = tournamentEngine.generateTournament(tournament.format, tournament.config, participants);
+      const initialState = tournamentEngine.generateTournament(tournament.format, tournament.config, engineParticipants);
 
       tournament.state_blob = initialState.state;
       tournament.status = 'active';
@@ -248,7 +254,10 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
           if (config.min_rest_minutes !== undefined) tournament.set('config.min_rest_minutes', config.min_rest_minutes);
           if (config.allow_walkovers !== undefined) tournament.set('config.allow_walkovers', config.allow_walkovers);
           if (config.divisions !== undefined) tournament.set('config.divisions', config.divisions);
-          if (config.fixture_dates !== undefined) tournament.set('config.fixture_dates', config.fixture_dates);
+          if (config.fixture_dates !== undefined) {
+            tournament.set('config.fixture_dates', config.fixture_dates);
+            tournament.markModified('config.fixture_dates');
+          }
         }
 
         if (participants && participants.length > 0) {
@@ -403,7 +412,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const [participants, matches, groups] = await Promise.all([
         TournamentParticipant.find({ tournament_id: tournament._id }),
         TournamentMatch.find({ tournament_id: tournament._id }).populate('match_id').sort({ round: 1, match_number: 1 }),
-        TournamentGroup.find({ tournament_id: tournament._id }),
+        TournamentGroup.find({ tournament_id: tournament._id }).sort({ name: 1 }),
       ]);
 
       res.json({ tournament, participants, matches, groups });
@@ -418,7 +427,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const tournament = await Tournament.findById(req.params.id);
       if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
 
-      const groups = await TournamentGroup.find({ tournament_id: tournament._id });
+      const groups = await TournamentGroup.find({ tournament_id: tournament._id }).sort({ name: 1 });
       const standings = tournamentEngine.getStandings(tournament.format, tournament.state_blob, groups);
       res.json(standings);
     } catch (error) {

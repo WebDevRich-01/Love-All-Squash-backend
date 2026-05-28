@@ -56,6 +56,9 @@ const tournamentSchema = new mongoose.Schema({
       count: { type: Number, default: 2 },
     },
 
+    // Fixture schedule: match_number → ISO date string (e.g. { D1F1: '2026-07-15' })
+    fixture_dates: { type: mongoose.Schema.Types.Mixed, default: {} },
+
     // Scheduling
     courts: { type: Number, default: 1 },
     min_rest_minutes: { type: Number, default: 20 },
