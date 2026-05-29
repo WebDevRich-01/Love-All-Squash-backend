@@ -517,6 +517,35 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     }
   });
 
+  // DELETE /:tournamentId/matches/:matchId/extra-player/:type — cancel a racketball/beginner match
+  router.delete('/:tournamentId/matches/:matchId/extra-player/:type', async (req, res) => {
+    try {
+      const { tournamentId, matchId, type } = req.params;
+
+      if (type !== 'racketball' && type !== 'beginner') {
+        return res.status(400).json({ error: 'type must be "racketball" or "beginner"' });
+      }
+
+      const match = await TournamentMatch.findOne({ _id: matchId, tournament_id: tournamentId });
+      if (!match) return res.status(404).json({ error: 'Match not found' });
+
+      if (match[`${type}_result`]?.team_a_games != null) {
+        return res.status(409).json({ error: 'Cannot remove a match that already has a result' });
+      }
+
+      match[`team_a_${type}_player`] = null;
+      match[`team_b_${type}_player`] = null;
+      match.markModified(`team_a_${type}_player`);
+      match.markModified(`team_b_${type}_player`);
+      await match.save();
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error({ err: error }, 'Error removing extra match player');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // PATCH /:tournamentId/matches/:matchId/lineup — save confirmed team lineup (no auth required)
   router.patch('/:tournamentId/matches/:matchId/lineup', async (req, res) => {
     try {
