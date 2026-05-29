@@ -481,9 +481,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
 
       const match = await TournamentMatch.findOne({ _id: matchId, tournament_id: tournamentId });
       if (!match) return res.status(404).json({ error: 'Match not found' });
-      if (match.status === 'completed') {
-        return res.status(409).json({ error: 'Match is already completed — use the result endpoint to edit' });
-      }
 
       match.draft_string_results = strings;
       await match.save();
