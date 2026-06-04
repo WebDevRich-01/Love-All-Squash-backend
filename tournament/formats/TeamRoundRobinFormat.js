@@ -55,20 +55,31 @@ class TeamRoundRobinFormat extends ITournamentFormat {
   onMatchResult(state, tournamentMatch, matchResult, groups, allMatches) {
     const aId = tournamentMatch.participant_a.participant_id?.toString();
     const bId = tournamentMatch.participant_b.participant_id?.toString();
-    const winnerId = matchResult.winner_id;
+    const winnerId = matchResult.winner_id?.toString();
     const loserId = matchResult.loser_id;
 
     const aGames = matchResult.team_a_games_total ?? 0;
     const bGames = matchResult.team_b_games_total ?? 0;
 
-    let aPoints, bPoints;
-    if (aGames > bGames) {
-      aPoints = 2; bPoints = 0;
-    } else if (bGames > aGames) {
-      aPoints = 0; bPoints = 2;
-    } else {
-      aPoints = 1; bPoints = 1; // draw
+    // 1 point per squash game won across all 5 string matches
+    let aPoints = 0, bPoints = 0;
+    (matchResult.string_results || []).forEach((s) => {
+      aPoints += s.team_a_games || 0;
+      bPoints += s.team_b_games || 0;
+    });
+
+    // Extra matches: both teams get 1 bonus point for playing + points per game won
+    for (const field of ['racketball_result', 'beginner_result']) {
+      const r = tournamentMatch[field];
+      if (r?.team_a_games != null) {
+        aPoints += 1 + (r.team_a_games || 0);
+        bPoints += 1 + (r.team_b_games || 0);
+      }
     }
+
+    // 2 bonus points for the overall fixture winner (most total games inc. extras)
+    if (winnerId === aId) aPoints += 2;
+    else if (winnerId === bId) bPoints += 2;
 
     const updatedMatch = {
       ...tournamentMatch,
@@ -83,8 +94,8 @@ class TeamRoundRobinFormat extends ITournamentFormat {
         string_results: matchResult.string_results || [],
         team_a_games_total: aGames,
         team_b_games_total: bGames,
-        team_a_league_points: aId === winnerId?.toString() ? aPoints : bPoints,
-        team_b_league_points: bId === winnerId?.toString() ? bPoints : aPoints,
+        team_a_league_points: aPoints,
+        team_b_league_points: bPoints,
         walkover: matchResult.walkover || false,
       },
     };
@@ -292,15 +303,20 @@ class TeamRoundRobinFormat extends ITournamentFormat {
       stats[bId].games_won += bGames;
       stats[bId].games_lost += aGames;
 
-      if (aGames > bGames) {
-        stats[aId].wins++;        stats[aId].league_points += 2;
+      // Use stored league points — computed by onMatchResult with the full formula
+      stats[aId].league_points += fixture.result?.team_a_league_points ?? 0;
+      stats[bId].league_points += fixture.result?.team_b_league_points ?? 0;
+
+      const winnerId = fixture.result?.winner_participant_id?.toString();
+      if (winnerId === aId) {
+        stats[aId].wins++;
         stats[bId].losses++;
-      } else if (bGames > aGames) {
-        stats[bId].wins++;        stats[bId].league_points += 2;
+      } else if (winnerId === bId) {
+        stats[bId].wins++;
         stats[aId].losses++;
       } else {
-        stats[aId].draws++;       stats[aId].league_points += 1;
-        stats[bId].draws++;       stats[bId].league_points += 1;
+        stats[aId].draws++;
+        stats[bId].draws++;
       }
     });
 

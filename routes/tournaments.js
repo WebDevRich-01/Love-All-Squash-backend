@@ -297,9 +297,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const tournament = await Tournament.findById(req.params.id);
       if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
 
-      const valid = await checkPassphrase(tournament, req.body.passphrase);
-      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
-
       const participant = await TournamentParticipant.findOneAndUpdate(
         { _id: req.params.participantId, tournament_id: tournament._id },
         { name: req.body.name },
@@ -343,9 +340,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
         return res.status(400).json({ error: 'Roster management only applies to team tournaments' });
       }
 
-      const valid = await checkPassphrase(tournament, req.body.passphrase);
-      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
-
       const participant = await TournamentParticipant.findOneAndUpdate(
         { _id: req.params.participantId, tournament_id: tournament._id },
         { roster: req.body.roster },
@@ -365,9 +359,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
     try {
       const tournament = await Tournament.findById(req.params.id);
       if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
-
-      const valid = await checkPassphrase(tournament, req.body.passphrase);
-      if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
 
       const { name, seed, is_pool, player_type } = req.body;
       if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -693,9 +684,6 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
 
         const tournament = await Tournament.findById(tournamentId);
         if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
-
-        const valid = await checkPassphrase(tournament, req.body.passphrase);
-        if (!valid) return res.status(401).json({ error: 'Invalid passphrase' });
 
         const tournamentMatch = await TournamentMatch.findById(matchId);
         if (!tournamentMatch) return res.status(404).json({ error: 'Tournament match not found' });
