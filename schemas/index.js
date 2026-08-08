@@ -1,6 +1,6 @@
 const { z } = require('zod');
 
-const FORMATS = ['single_elimination', 'monrad', 'team_round_robin'];
+const FORMATS = ['single_elimination', 'monrad', 'team_round_robin', 'team_round_robin_playoff'];
 
 // POST /api/matches
 const matchSchema = z.object({

@@ -44,6 +44,8 @@ NODE_ENV=development
 | `round_robin` | Round Robin |
 | `monrad` | Monrad (Swiss-style) |
 | `pools_knockout` | Pools + Knockout |
+| `team_round_robin` | Team Round Robin |
+| `team_round_robin_playoff` | Team Round Robin Playoff |
 
 ### Monrad / Swiss Pairing Notes
 Monrad uses true Swiss pairing — all Round 1 participants are known up-front (no placeholders). Later rounds are generated dynamically when the previous round completes. Player state (wins, losses, opponents, game points) is maintained in `state_blob.players`.

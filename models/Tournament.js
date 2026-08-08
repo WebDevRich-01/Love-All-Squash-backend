@@ -11,6 +11,7 @@ const tournamentSchema = new mongoose.Schema({
       'monrad',
       'pools_knockout',
       'team_round_robin',
+      'team_round_robin_playoff',
     ],
   },
 

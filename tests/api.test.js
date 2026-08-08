@@ -35,6 +35,39 @@ const validMonradTournament = (overrides = {}) => ({
   ...overrides,
 });
 
+// Division A (0): 1=A1..4=A4. Division B (1): 1=B1..4=B4.
+const makePlayoffParticipants = () => [
+  { name: 'Alpha 1st', division_index: 0, seed: 1 },
+  { name: 'Alpha 2nd', division_index: 0, seed: 2 },
+  { name: 'Alpha 3rd', division_index: 0, seed: 3 },
+  { name: 'Alpha 4th', division_index: 0, seed: 4 },
+  { name: 'Beta 1st', division_index: 1, seed: 1 },
+  { name: 'Beta 2nd', division_index: 1, seed: 2 },
+  { name: 'Beta 3rd', division_index: 1, seed: 3 },
+  { name: 'Beta 4th', division_index: 1, seed: 4 },
+];
+
+const validPlayoffTournament = (overrides = {}) => ({
+  name: 'Test Playoff Tournament',
+  format: 'team_round_robin_playoff',
+  passphrase: TEST_PASSPHRASE,
+  participants: makePlayoffParticipants(),
+  ...overrides,
+});
+
+const submitFixtureResult = (app, tournamentId, matchId, winnerId, winnerName, loserId, loserName) =>
+  request(app)
+    .post(`/api/tournaments/${tournamentId}/matches/${matchId}/result`)
+    .send({
+      winner_id: winnerId,
+      winner_name: winnerName,
+      loser_id: loserId,
+      loser_name: loserName,
+      team_a_games_total: 3,
+      team_b_games_total: 0,
+      string_results: [{ string_number: 1, team_a_games: 3, team_b_games: 0 }],
+    });
+
 // Create a tournament AND start it, returning { tournamentId, matches }
 const createAndStart = async (payload) => {
   const create = await request(app).post('/api/tournaments').send(payload).expect(201);
@@ -68,11 +101,13 @@ afterEach(async () => {
 // ─── GET /api/tournaments/formats ─────────────────────────────────────────────
 
 describe('GET /api/tournaments/formats', () => {
-  it('returns only single_elimination and monrad', async () => {
+  it('returns the production-ready formats, excluding unfinished ones', async () => {
     const res = await request(app).get('/api/tournaments/formats').expect(200);
     const ids = res.body.map((f) => f.id);
     expect(ids).toContain('single_elimination');
     expect(ids).toContain('monrad');
+    expect(ids).toContain('team_round_robin');
+    expect(ids).toContain('team_round_robin_playoff');
     expect(ids).not.toContain('round_robin');
     expect(ids).not.toContain('pools_knockout');
   });
@@ -369,5 +404,181 @@ describe('GET /api/tournaments/:id/standings', () => {
   it('returns 404 for unknown tournament', async () => {
     const fakeId = new mongoose.Types.ObjectId().toString();
     await request(app).get(`/api/tournaments/${fakeId}/standings`).expect(404);
+  });
+});
+
+// ─── Team Round Robin Playoff ─────────────────────────────────────────────────
+
+describe('POST /api/tournaments/:id/start (team_round_robin_playoff)', () => {
+  it('creates a team tournament and generates 4 ready semis + 4 pending TBD matches', async () => {
+    const create = await request(app).post('/api/tournaments').send(validPlayoffTournament()).expect(201);
+    expect(create.body.tournament.tournament_type).toBe('team');
+    const id = create.body.tournament._id;
+
+    const res = await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+
+    expect(res.body.tournament.status).toBe('active');
+    expect(res.body.matches).toHaveLength(8);
+    const ready = res.body.matches.filter((m) => m.status === 'ready');
+    const pending = res.body.matches.filter((m) => m.status === 'pending');
+    expect(ready).toHaveLength(4);
+    expect(pending).toHaveLength(4);
+    pending.forEach((m) => {
+      expect(m.participant_a.type).toBe('tbd');
+      expect(m.participant_b.type).toBe('tbd');
+    });
+  });
+
+  it('applies config.fixture_dates to the semi-final matches by match_number', async () => {
+    const create = await request(app)
+      .post('/api/tournaments')
+      .send(validPlayoffTournament({
+        config: {
+          match: { best_of: 5, points_to_win: 15, clear_points: 2 },
+          divisions: { count: 2 },
+          fixture_dates: { 'PINT-SF-A': '2026-09-01', 'HP-SF-B': '2026-09-02' },
+        },
+      }))
+      .expect(201);
+    const id = create.body.tournament._id;
+
+    const res = await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+
+    const sfA = res.body.matches.find((m) => m.match_number === 'PINT-SF-A');
+    const sfBHalfPint = res.body.matches.find((m) => m.match_number === 'HP-SF-B');
+    const untouched = res.body.matches.find((m) => m.match_number === 'PINT-SF-B');
+    expect(new Date(sfA.scheduled_at).toISOString().slice(0, 10)).toBe('2026-09-01');
+    expect(new Date(sfBHalfPint.scheduled_at).toISOString().slice(0, 10)).toBe('2026-09-02');
+    expect(untouched.scheduled_at).toBeUndefined();
+  });
+
+  it('starts successfully when pool/racketball/beginner extras are included alongside the 8 teams', async () => {
+    const participants = [
+      ...makePlayoffParticipants(),
+      { name: 'Pool Player', is_pool: true, seed: 1 },
+      { name: 'Racketball Player', player_type: 'racketball' },
+      { name: 'Beginner Player', player_type: 'beginner' },
+    ];
+    const create = await request(app)
+      .post('/api/tournaments')
+      .send(validPlayoffTournament({ participants }))
+      .expect(201);
+    expect(create.body.participants).toHaveLength(11);
+    const id = create.body.tournament._id;
+
+    const res = await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+    expect(res.body.tournament.status).toBe('active');
+    expect(res.body.matches).toHaveLength(8);
+
+    const detail = await request(app).get(`/api/tournaments/${id}`).expect(200);
+    expect(detail.body.participants).toHaveLength(11);
+    expect(detail.body.participants.some((p) => p.is_pool)).toBe(true);
+    expect(detail.body.participants.some((p) => p.player_type === 'racketball')).toBe(true);
+    expect(detail.body.participants.some((p) => p.player_type === 'beginner')).toBe(true);
+  });
+
+  it('returns 400 when a division does not have exactly 4 teams', async () => {
+    const participants = makePlayoffParticipants();
+    participants[3].division_index = 1; // 5 teams in division B, 3 in division A
+    const create = await request(app)
+      .post('/api/tournaments')
+      .send(validPlayoffTournament({ participants }))
+      .expect(201);
+    const id = create.body.tournament._id;
+
+    await request(app)
+      .post(`/api/tournaments/${id}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(400);
+  });
+});
+
+describe('Team Round Robin Playoff: full bracket playthrough', () => {
+  it('advances winners through both brackets and reports correct final placements', async () => {
+    const create = await request(app).post('/api/tournaments').send(validPlayoffTournament()).expect(201);
+    const tournamentId = create.body.tournament._id;
+    const start = await request(app)
+      .post(`/api/tournaments/${tournamentId}/start`)
+      .send({ passphrase: TEST_PASSPHRASE })
+      .expect(200);
+
+    const byNumber = (number) => start.body.matches.find((m) => m.match_number === number);
+    const findByName = (match, name) =>
+      match.participant_a.name === name ? match.participant_a : match.participant_b;
+
+    // Play both semis in each bracket, Alpha teams winning throughout.
+    const semis = [
+      ['PINT-SF-A', 'Alpha 1st', 'Beta 2nd'],
+      ['PINT-SF-B', 'Alpha 2nd', 'Beta 1st'],
+      ['HP-SF-A', 'Alpha 3rd', 'Beta 4th'],
+      ['HP-SF-B', 'Alpha 4th', 'Beta 3rd'],
+    ];
+    for (const [matchNumber, winnerName, loserName] of semis) {
+      const match = byNumber(matchNumber);
+      const winner = findByName(match, winnerName);
+      const loser = findByName(match, loserName);
+      await submitFixtureResult(
+        app,
+        tournamentId,
+        match._id,
+        winner.participant_id,
+        winner.name,
+        loser.participant_id,
+        loser.name
+      ).expect(200);
+    }
+
+    let detail = await request(app).get(`/api/tournaments/${tournamentId}`).expect(200);
+    const findCurrent = (number) => detail.body.matches.find((m) => m.match_number === number);
+
+    const finals = [
+      ['PINT-F', 'Alpha 1st', 'Alpha 2nd'],
+      ['PINT-3V4', 'Beta 2nd', 'Beta 1st'],
+      ['HP-F', 'Alpha 3rd', 'Alpha 4th'],
+      ['HP-7V8', 'Beta 4th', 'Beta 3rd'],
+    ];
+    let last;
+    for (const [matchNumber, winnerName, loserName] of finals) {
+      const match = findCurrent(matchNumber);
+      expect(match.status).toBe('ready');
+      const winner = findByName(match, winnerName);
+      const loser = findByName(match, loserName);
+      last = await submitFixtureResult(
+        app,
+        tournamentId,
+        match._id,
+        winner.participant_id,
+        winner.name,
+        loser.participant_id,
+        loser.name
+      ).expect(200);
+    }
+
+    expect(last.body.tournament_complete).toBe(true);
+
+    detail = await request(app).get(`/api/tournaments/${tournamentId}`).expect(200);
+    expect(detail.body.tournament.status).toBe('completed');
+
+    const finalResults = await request(app).get(`/api/tournaments/${tournamentId}/final-results`).expect(200);
+    expect(finalResults.body.map((r) => r.name)).toEqual([
+      'Alpha 1st',
+      'Alpha 2nd',
+      'Beta 2nd',
+      'Beta 1st',
+      'Alpha 3rd',
+      'Alpha 4th',
+      'Beta 4th',
+      'Beta 3rd',
+    ]);
+    expect(finalResults.body.map((r) => r.position)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });

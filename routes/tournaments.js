@@ -6,6 +6,7 @@ const TournamentMatch = require('../models/TournamentMatch');
 const TournamentGroup = require('../models/TournamentGroup');
 const validate = require('../middleware/validate');
 const requireAdmin = require('../middleware/auth');
+const { TEAM_FORMATS, deriveTournamentType } = require('../tournament/formatMeta');
 const {
   tournamentSchema,
   verifyPassphraseSchema,
@@ -68,7 +69,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const { name, format, config, participants, start_date, end_date, venue, description, passphrase } = req.body;
 
       const passphraseHash = await bcrypt.hash(passphrase, 10);
-      const tournament_type = format === 'team_round_robin' ? 'team' : 'individual';
+      const tournament_type = deriveTournamentType(format);
 
       const tournament = new Tournament({
         name, format, config, start_date, end_date, venue, description,
@@ -129,9 +130,9 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
 
       const participants = await TournamentParticipant.find({ tournament_id: tournament._id });
 
-      // For team_round_robin, only pass actual team participants to the engine;
+      // For team formats, only pass actual team participants to the engine;
       // pool/racketball/beginner players are tournament metadata, not match participants.
-      const engineParticipants = tournament.format === 'team_round_robin'
+      const engineParticipants = TEAM_FORMATS.has(tournament.format)
         ? participants.filter((p) => !p.is_pool && !p.player_type)
         : participants;
 
@@ -246,7 +247,7 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       if (tournament.status === 'draft') {
         if (format !== undefined) {
           tournament.format = format;
-          tournament.tournament_type = format === 'team_round_robin' ? 'team' : 'individual';
+          tournament.tournament_type = deriveTournamentType(format);
         }
         if (config !== undefined) {
           if (config.match !== undefined) tournament.set('config.match', config.match);
@@ -421,6 +422,20 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
       const groups = await TournamentGroup.find({ tournament_id: tournament._id }).sort({ name: 1 });
       const standings = tournamentEngine.getStandings(tournament.format, tournament.state_blob, groups);
       res.json(standings);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /:id/final-results
+  router.get('/:id/final-results', async (req, res) => {
+    try {
+      const tournament = await Tournament.findById(req.params.id);
+      if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+      const groups = await TournamentGroup.find({ tournament_id: tournament._id }).sort({ name: 1 });
+      const finalResults = tournamentEngine.getFinalResults(tournament.format, tournament.state_blob, groups);
+      res.json(finalResults);
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
@@ -740,6 +755,9 @@ module.exports = function createTournamentRouter(tournamentEngine, logger) {
 
         res.json({ success: true, message: 'Match result updated' });
       } catch (error) {
+        if (error.code === 'BRACKET_LOCKED') {
+          return res.status(409).json({ error: error.message });
+        }
         logger.error({ err: error }, 'Error updating match result');
         res.status(500).json({ error: error.message });
       }
